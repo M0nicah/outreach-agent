@@ -965,6 +965,463 @@ def cmd_mark_sent(config: Config, args) -> int:
     return 0
 
 
+def cmd_followups(config: Config, args) -> int:
+    """Show which follow-ups are due, and optionally draft them.
+
+    Works whether you send by hand or through Gmail, because it reads
+    Date Sent from the workbook rather than from any mail provider.
+    """
+    from datetime import date
+
+    from app.excel import read_settings, update_row
+    from app.followups import (
+        FollowUpError,
+        find_due,
+        generate_followup,
+        record_followup_updates,
+    )
+
+    try:
+        outreach = read_outreach(config.excel_path)
+        settings = read_settings(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not outreach:
+        print("\nNo outreach rows yet. Run: python main.py draft\n")
+        return 0
+
+    schedule = {
+        1: config.followup_1_days,
+        2: config.followup_2_days,
+        3: config.followup_3_days,
+    }
+
+    due, upcoming, stopped = find_due(
+        outreach, today=date.today(), schedule=schedule, include_upcoming=True
+    )
+
+    print(f"\n{'='*68}\n  FOLLOW-UPS\n{'='*68}\n")
+    print(f"  Schedule: day {schedule[1]}, day {schedule[2]}, day {schedule[3]} "
+          f"after sending. Maximum 3.\n")
+
+    if due:
+        print(f"  DUE NOW ({len(due)}):\n")
+        for item in due:
+            overdue = (
+                "due today" if item.days_overdue == 0
+                else f"{item.days_overdue} day(s) overdue"
+            )
+            print(f"    {item.outreach_row.get('Outreach ID')}  "
+                  f"{str(item.outreach_row.get('Company Name'))[:28]:<30} "
+                  f"{item.label:<16} {overdue}")
+    else:
+        print("  Nothing is due today.\n")
+
+    if upcoming:
+        print(f"\n  UPCOMING ({len(upcoming)}):\n")
+        for item in upcoming:
+            print(f"    {item.outreach_row.get('Outreach ID')}  "
+                  f"{str(item.outreach_row.get('Company Name'))[:28]:<30} "
+                  f"{item.label:<16} due {item.due_date} "
+                  f"(in {-item.days_overdue} day(s))")
+
+    if stopped:
+        print(f"\n  SEQUENCE STOPPED ({len(stopped)}):\n")
+        for row, reason in stopped:
+            print(f"    {row.get('Outreach ID')}  "
+                  f"{str(row.get('Company Name'))[:28]:<30} {reason}")
+
+    if not args.draft:
+        print()
+        if due:
+            print("  To draft these follow-ups:  python main.py followups --draft\n")
+        return 0
+
+    # --- Drafting ---------------------------------------------------------
+
+    if not due:
+        print("\n  Nothing to draft.\n")
+        return 0
+
+    if args.mock:
+        print("\n  MOCK MODE -- drafts are fake.\n")
+    elif not config.has_ai_key:
+        logger.error("No AI API key configured. Add AI_API_KEY to .env, or use --mock.")
+        return 1
+
+    try:
+        ai_caller = get_ai_caller(config, use_mock=args.mock)
+    except AIError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    from app.email_drafts import build_signature, strip_trailing_name
+
+    signature = build_signature(settings)
+    drafted = 0
+
+    print(f"\n  Drafting {len(due)} follow-up(s)...\n")
+
+    for index, item in enumerate(due):
+        row = item.outreach_row
+        company = str(row.get("Company Name", "?"))
+
+        if index > 0 and not args.mock and config.seconds_between_ai_calls:
+            time.sleep(config.seconds_between_ai_calls)
+
+        sent_on = row.get("Date Sent")
+        days_since = (date.today() - item.due_date).days + (
+            config.followup_1_days if item.number == 1 else 0
+        )
+
+        try:
+            draft, problems = generate_followup(
+                config, row, item.number, max(days_since, 1), settings, ai_caller
+            )
+        except FollowUpError as exc:
+            logger.error("%s", exc)
+            continue
+
+        body = strip_trailing_name(draft.body, str(settings.get("Name", "")))
+        full_body = f"{body.rstrip()}\n\n{signature}"
+
+        print("=" * 68)
+        print(f"  {row.get('Outreach ID')}  {company}  --  {item.label}")
+        print("=" * 68)
+        print(f"Subject: {draft.subject}\n")
+        print(full_body)
+        if problems:
+            print("\n  ! QUALITY WARNINGS:")
+            for problem in problems:
+                print(f"      - {problem}")
+        print()
+        drafted += 1
+
+    print("=" * 68)
+    print(f"\n  Drafted {drafted} follow-up(s). NOTHING has been sent or saved.")
+    print("  These are shown for you to copy, edit and send yourself.")
+    print("\n  After sending one, record it:")
+    print("      python main.py mark-followup O003 1\n")
+    return 0
+
+
+def cmd_mark_followup(config: Config, args) -> int:
+    """Record that you sent a follow-up by hand."""
+    from app.excel import today, update_row
+    from app.followups import FollowUpError, has_replied, record_followup_updates
+
+    try:
+        outreach = read_outreach(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    wanted = args.outreach_id.strip().upper()
+    matches = [
+        r for r in outreach
+        if str(r.get("Outreach ID", "")).strip().upper() == wanted
+    ]
+    if not matches:
+        logger.error("No outreach row with ID %s.", wanted)
+        return 1
+
+    row = matches[0]
+
+    # Refuse to log a follow-up to someone who already replied.
+    if has_replied(row):
+        logger.error(
+            "%s already received a reply (%s). The follow-up sequence should "
+            "have stopped -- not recording this.",
+            wanted, row.get("Reply Status"),
+        )
+        return 1
+
+    try:
+        updates = record_followup_updates(
+            args.number, today(), notes=str(row.get("Notes", ""))
+        )
+    except FollowUpError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        update_row(config.excel_path, schema.OUTREACH, row["_row"], updates)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  {wanted}: recorded follow-up {args.number} sent {today()}.")
+    print("  Run `python main.py followups` to see what is next.\n")
+    return 0
+
+
+def cmd_gmail_auth(config: Config, args) -> int:
+    """Authorise Gmail access, or confirm existing authorisation."""
+    from app.gmail import GmailError, authenticate, get_profile
+
+    try:
+        service = authenticate(force=args.force)
+        profile = get_profile(service)
+    except GmailError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  Authorised as: {profile.get('emailAddress')}")
+    print(f"  Messages in mailbox: {profile.get('messagesTotal')}")
+    print(f"  Token saved to: token.json (git-ignored -- never share it)")
+    print("\n  Next: send a test email to yourself with")
+    print("        python main.py gmail-test\n")
+    return 0
+
+
+def cmd_gmail_test(config: Config, args) -> int:
+    """Send one test email to YOURSELF. Never to a company.
+
+    Your specification requires the first live send to go to your own
+    address. This command cannot send anywhere else: the recipient is
+    read from the Settings sheet and checked against the authorised
+    account, so a typo cannot email a stranger.
+    """
+    from app.excel import read_settings
+    from app.gmail import (
+        GmailError,
+        authenticate,
+        build_message,
+        get_profile,
+        send_message,
+    )
+
+    try:
+        settings = read_settings(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    own_address = str(settings.get("Email", "")).strip()
+    if not own_address or own_address == "FILL_IN":
+        logger.error(
+            "Your own email is not set in the Settings sheet. "
+            "Fill in the Email row before running a test send."
+        )
+        return 1
+
+    try:
+        service = authenticate()
+        profile = get_profile(service)
+    except GmailError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    authorised = str(profile.get("emailAddress", "")).strip()
+
+    # The safety interlock: the test can only ever go to the account we
+    # are authorised as. There is no way to point this at a company.
+    if authorised.lower() != own_address.lower():
+        logger.error(
+            "Refusing to send. The Settings sheet says your email is %s, but "
+            "Gmail is authorised as %s. A test email must go to your own "
+            "account. Fix the Email row in Settings, or re-authorise.",
+            own_address, authorised,
+        )
+        return 1
+
+    body = (
+        "This is a test message from the internship outreach system.\n\n"
+        "If you are reading this, Gmail sending works. No employer has been "
+        "contacted by this test.\n\n"
+        f"Authorised account: {authorised}\n"
+        f"Daily send limit:   {config.daily_send_limit}\n"
+        f"Batch size:         {config.batch_size}\n"
+        f"Dry run:            {config.dry_run}\n"
+    )
+
+    if config.dry_run:
+        print("\n  DRY_RUN is true -- nothing was sent.")
+        print("  This is what WOULD have been sent:\n")
+        print(f"    To:      {own_address}")
+        print(f"    Subject: Outreach system test\n")
+        print("  Set DRY_RUN=false in .env when you are ready to send it.\n")
+        return 0
+
+    try:
+        payload = build_message(own_address, "Outreach system test", body)
+        message_id = send_message(service, payload)
+    except GmailError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  Sent a test email to {own_address}")
+    print(f"  Gmail message id: {message_id}")
+    print("\n  Check your inbox. If it arrived, sending works.\n")
+    return 0
+
+
+def cmd_send(config: Config, args) -> int:
+    """Send approved emails through Gmail.
+
+    Every guard is enforced here: the approval gate, DRY_RUN, the daily
+    limit, the batch size, the delay between sends, and duplicate
+    prevention.
+    """
+    from app.approval import is_sendable
+    from app.excel import read_settings, today, update_row
+    from app.gmail import (
+        GmailError,
+        authenticate,
+        build_message,
+        failed_updates,
+        get_profile,
+        is_valid_email,
+        remaining_today,
+        send_message,
+        sent_today,
+        sent_updates,
+    )
+    from app.manual_send import SendRoute, resolve_route
+
+    try:
+        outreach = read_outreach(config.excel_path)
+        contacts = read_contacts(config.excel_path)
+        settings = read_settings(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    contacts_by_id = {str(c.get("Contact ID", "")).strip(): c for c in contacts}
+
+    # 1. Approval gate. Same function the manual path uses.
+    approved = []
+    for row in outreach:
+        allowed, reason = is_sendable(row)
+        if allowed:
+            approved.append(row)
+
+    if not approved:
+        print("\n  Nothing is approved and unsent.")
+        print("  Run `python main.py check-approvals` to see why.\n")
+        return 0
+
+    # 2. Split by route. Portal applications cannot be emailed.
+    sendable = []
+    portal_only = []
+    for row in approved:
+        route, target = resolve_route(row, contacts_by_id)
+        if route == SendRoute.EMAIL and is_valid_email(target):
+            sendable.append((row, target))
+        else:
+            portal_only.append((row, target))
+
+    # 3. Daily limit and batch size.
+    already = sent_today(outreach)
+    remaining = remaining_today(config, outreach)
+    batch = min(config.batch_size, remaining, len(sendable))
+    if args.limit is not None:
+        batch = min(batch, args.limit)
+
+    print(f"\n{'='*66}\n  SENDING\n{'='*66}\n")
+    print(f"  Approved and unsent : {len(approved)}")
+    print(f"  Can be emailed      : {len(sendable)}")
+    if portal_only:
+        print(f"  Portal applications : {len(portal_only)}  (apply by hand, "
+              "cannot be emailed)")
+    print(f"  Already sent today  : {already} of {config.daily_send_limit}")
+    print(f"  Will send now       : {batch}")
+    print(f"  Dry run             : {config.dry_run}")
+    print()
+
+    if remaining <= 0:
+        print(f"  Daily limit of {config.daily_send_limit} reached. "
+              "Try again tomorrow, or raise DAILY_SEND_LIMIT in .env.\n")
+        return 0
+
+    if batch <= 0:
+        print("  Nothing to send by email right now.\n")
+        for row, target in portal_only:
+            print(f"    {row.get('Outreach ID')}  "
+                  f"{str(row.get('Company Name'))[:28]:<30} apply at {str(target)[:40]}")
+        print()
+        return 0
+
+    if config.dry_run:
+        print("  DRY_RUN is true -- nothing will be sent. These would go out:\n")
+        for row, target in sendable[:batch]:
+            print(f"    {row.get('Outreach ID')}  "
+                  f"{str(row.get('Company Name'))[:26]:<28} -> {target}")
+        print("\n  Set DRY_RUN=false in .env to send for real.\n")
+        return 0
+
+    # 4. Confirm before sending to real people.
+    if not args.yes:
+        print("  These emails will be sent to real people:\n")
+        for row, target in sendable[:batch]:
+            print(f"    {row.get('Outreach ID')}  "
+                  f"{str(row.get('Company Name'))[:26]:<28} -> {target}")
+        try:
+            answer = input("\n  Type SEND to confirm: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.\n")
+            return 0
+        if answer != "SEND":
+            print("  Cancelled -- nothing was sent.\n")
+            return 0
+
+    try:
+        service = authenticate()
+        profile = get_profile(service)
+    except GmailError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    from_address = str(profile.get("emailAddress", ""))
+    print(f"\n  Sending as {from_address}\n")
+
+    sent = failed = 0
+    for index, (row, target) in enumerate(sendable[:batch]):
+        outreach_id = row.get("Outreach ID")
+        company = str(row.get("Company Name", "?"))
+
+        # Delay between sends, so a run does not look like a burst.
+        if index > 0 and config.seconds_between_sends:
+            time.sleep(config.seconds_between_sends)
+
+        try:
+            payload = build_message(
+                target, str(row.get("Subject", "")), str(row.get("Email Body", "")),
+            )
+            message_id = send_message(service, payload)
+        except GmailError as exc:
+            logger.error("%s (%s): %s", outreach_id, company, exc)
+            try:
+                update_row(config.excel_path, schema.OUTREACH, row["_row"],
+                           failed_updates(str(exc)))
+            except ExcelError as save_exc:
+                logger.error("Could not record the failure: %s", save_exc)
+            failed += 1
+            continue
+
+        try:
+            update_row(config.excel_path, schema.OUTREACH, row["_row"],
+                       sent_updates(message_id, today()))
+        except ExcelError as exc:
+            # The email HAS gone. Say so loudly -- an unrecorded send
+            # could be repeated tomorrow.
+            logger.error(
+                "%s was SENT to %s but could not be recorded in the workbook "
+                "(%s). Set Email Status to SENT by hand to avoid sending it "
+                "again.", outreach_id, target, exc,
+            )
+
+        print(f"    sent  {outreach_id}  {company[:30]:<32} -> {target}")
+        sent += 1
+
+    print(f"\n  Sent {sent}, failed {failed}.")
+    print(f"  Today's total: {sent_today(read_outreach(config.excel_path))} "
+          f"of {config.daily_send_limit}\n")
+    return 0
+
+
 def cmd_report(config: Config, args) -> int:
     """Show the score distribution and pipeline counts.
 
@@ -1095,6 +1552,11 @@ COMMANDS = {
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
     "report": cmd_report,
+    "gmail-auth": cmd_gmail_auth,
+    "gmail-test": cmd_gmail_test,
+    "send": cmd_send,
+    "followups": cmd_followups,
+    "mark-followup": cmd_mark_followup,
     "export": cmd_export,
     "mark-sent": cmd_mark_sent,
     "review": cmd_review,
@@ -1188,6 +1650,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser(
         "check-approvals", help="Show what would be sent, and why the rest would not."
+    )
+
+    auth_parser = subparsers.add_parser(
+        "gmail-auth", help="Authorise Gmail access (opens your browser once)."
+    )
+    auth_parser.add_argument(
+        "--force", action="store_true", help="Ignore the saved token and re-authorise."
+    )
+
+    subparsers.add_parser(
+        "gmail-test", help="Send one test email to YOUR OWN address."
+    )
+
+    send_parser = subparsers.add_parser(
+        "send", help="Send approved emails through Gmail."
+    )
+    send_parser.add_argument(
+        "--limit", type=int, default=None, help="Send at most N this run."
+    )
+    send_parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt."
+    )
+
+    followups_parser = subparsers.add_parser(
+        "followups", help="Show which follow-ups are due; --draft to write them."
+    )
+    followups_parser.add_argument(
+        "--draft", action="store_true", help="Draft the follow-ups that are due."
+    )
+    followups_parser.add_argument("--mock", action="store_true", help="Fake drafts, no AI.")
+
+    mark_followup_parser = subparsers.add_parser(
+        "mark-followup", help="Record that you sent a follow-up by hand."
+    )
+    mark_followup_parser.add_argument("outreach_id", help="e.g. O003")
+    mark_followup_parser.add_argument(
+        "number", type=int, choices=[1, 2, 3], help="Which follow-up (1, 2 or 3)."
     )
 
     export_parser = subparsers.add_parser(

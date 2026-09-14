@@ -1,0 +1,56 @@
+Write a short follow-up email for a student who has not had a reply to an
+earlier internship enquiry.
+
+# CRITICAL
+
+This is follow-up number {followup_number} of a maximum of 3.
+It was sent {days_since} days after the original email.
+
+Do NOT repeat the original email. They already have it. A follow-up that
+restates the whole message is just noise, and it reads as automated.
+
+Keep it SHORT. {length_guidance}
+
+# THE ORIGINAL EMAIL THEY RECEIVED
+
+Subject: {original_subject}
+
+{original_body}
+
+# THE STUDENT
+
+{student_profile}
+
+# WHAT THIS FOLLOW-UP SHOULD DO
+
+{followup_purpose}
+
+# RULES
+
+- Reference the earlier email briefly, without quoting it.
+- Add something small and useful, or ask a simpler question than before.
+  A follow-up that only says "just checking in" wastes their time.
+- No guilt, no pressure, no "I have not heard back from you".
+- Do not imply they were rude or slow. They are busy.
+- Never invent anything about the organisation.
+- Do not restate the student's full skill list. One short phrase at most.
+- No flattery. Do not use: passionate, thrilled, delighted, excited,
+  leverage, esteemed, renowned, cutting-edge, world-class.
+- No exclamation marks.
+- Do not sign off with the student's name -- a signature block is added
+  automatically afterwards.
+- Address it the same way as the original: a team, never an invented
+  person's name.
+
+Subject line: reply-style, referencing the original thread. For example
+"Re: {original_subject}". Keep it recognisable so they can connect it to
+the first email.
+
+# OUTPUT
+
+Return ONLY a JSON object. No markdown fences, no commentary.
+
+{{
+  "subject": "the subject line",
+  "body": "the email body, with \\n between paragraphs, ending at the closing line"
+}}

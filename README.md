@@ -52,6 +52,8 @@ app/
   email_drafts.py    generates drafts + quality checks; sends nothing
   approval.py        the human approval gate -- decides what may send
   manual_send.py     export for sending by hand + sent tracking
+  followups.py       follow-up schedule and drafting; stops on reply
+  gmail.py           OAuth + sending, with every safety limit enforced
 prompts/             AI prompt templates (Stage 3+)
 data/                the Excel workbook -- the database (Stage 2)
 tests/               unit tests
@@ -70,9 +72,9 @@ main.py              CLI entry point
 | 6  | Email drafting                 | done |
 | 7  | Approval workflow              | done |
 | 7b | Manual sending + tracking      | done |
-| 8  | Gmail sending (optional)       | next |
+| 8  | Gmail sending                  | done |
 | 9  | Reply tracking                 | |
-| 10 | Follow-ups                     | |
+| 10 | Follow-ups                     | done |
 | 11 | Reporting                      | |
 | 12 | Optional Streamlit dashboard   | |
 
@@ -113,7 +115,87 @@ python main.py check-approvals  # show exactly what would be sent
 
 python main.py export           # write approved emails to data/to_send.txt
 python main.py mark-sent O001   # record that you sent one by hand
+
+python main.py followups          # who is due for a follow-up
+python main.py followups --draft  # write the follow-ups that are due
+python main.py mark-followup O003 1   # record that you sent follow-up 1
+
+python main.py gmail-auth       # authorise Gmail (opens your browser once)
+python main.py gmail-test       # send ONE test email to your own address
+python main.py send             # send approved emails
 ```
+
+## Gmail setup
+
+One-time setup in Google Cloud Console:
+
+1. Create a project, enable the **Gmail API**.
+2. **OAuth consent screen** -> External -> add the scopes
+   `gmail.send` and `gmail.readonly` -> add your own address under
+   **Test users** (this step is easy to miss and causes most failures).
+3. **Credentials** -> OAuth client ID -> **Desktop app** -> download the
+   JSON as `credentials.json` in the project root.
+
+Then:
+
+```bash
+python main.py gmail-auth   # opens your browser, saves token.json
+python main.py gmail-test   # sends one test email to YOURSELF
+```
+
+On first authorisation Google warns that the app is not verified. That is
+expected for an app you built for your own use: click **Advanced -> Go to
+(app name) (unsafe)**.
+
+`credentials.json` and `token.json` are git-ignored. **token.json can send
+mail as you -- never share it or commit it.**
+
+## Sending safety
+
+Every guard is enforced in code, not by convention:
+
+| Guard | Behaviour |
+|---|---|
+| Approval gate | Calls the same `is_sendable()` the manual path uses. The sender does not reimplement it. |
+| `DRY_RUN=true` | Blocks all sending and shows what would have gone. **On by default.** |
+| `DAILY_SEND_LIMIT` | Counted from the workbook, so it survives restarts and counts emails you sent by hand. |
+| `BATCH_SIZE` | Caps how many go out in one run. |
+| `SECONDS_BETWEEN_SENDS` | Pause between messages. |
+| Duplicate prevention | An already-SENT row is refused. |
+| Confirmation | Typing `SEND` is required before emailing real people. |
+| Failures | Recorded as `FAILED` with the reason. Never silent. |
+
+The first live send must go to your own address: `gmail-test` reads your
+address from Settings and refuses unless it matches the authorised
+account, so it cannot email a company.
+
+## Follow-ups
+
+```
+Day 0    initial email
+Day 5    follow-up 1   did this reach the right person? offer a CV
+Day 12   follow-up 2   a narrower question: do you take attachment students?
+Day 22   follow-up 3   final message, graceful close, no new ask
+```
+
+Each follow-up has a **different job**. Three messages that all say "just
+checking in" read as automated nagging, so the prompt gives each one its
+own purpose and each is shorter than the last.
+
+Two rules matter more than the dates:
+
+1. **A reply stops the sequence immediately** -- whatever it said. A
+   rejection is still a reply, and chasing someone who has answered is
+   the fastest way to annoy an employer.
+2. **There is never a fourth follow-up.** No code path schedules one.
+
+The schedule runs off `Date Sent` in the workbook, so it works whether
+you send by hand or through Gmail. Change the intervals in `.env`
+(`FOLLOWUP_1_DAYS`, etc.).
+
+Quality checks apply to follow-ups too, plus two of their own: a
+follow-up that simply resends the original is flagged, and so is one that
+sounds like a complaint ("I have not heard back from you").
 
 ## Sending by hand
 

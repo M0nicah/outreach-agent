@@ -8,3 +8,7 @@ google-genai==2.23.0    # Google Gemini client -- default provider (Stage 3)
 openai==1.59.6          # OpenAI client, used when AI_PROVIDER=openai
 pydantic==2.10.5        # validates AI JSON output before it touches Excel (Stage 3)
 requests==2.32.3        # plain HTTP for web research (Stage 3)
+
+google-auth==2.58.0
+google-auth-oauthlib==1.4.1
+google-api-python-client==2.200.0

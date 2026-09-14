@@ -78,6 +78,11 @@ class Config:
     ai_model: str
     seconds_between_ai_calls: int
 
+    # Follow-up schedule: days after the initial send.
+    followup_1_days: int
+    followup_2_days: int
+    followup_3_days: int
+
     # Paths
     excel_path: Path
 
@@ -165,6 +170,9 @@ def load_config() -> Config:
         ai_api_key=api_key,
         ai_model=model,
         seconds_between_ai_calls=_get_int("SECONDS_BETWEEN_AI_CALLS", 4),
+        followup_1_days=_get_int("FOLLOWUP_1_DAYS", 5),
+        followup_2_days=_get_int("FOLLOWUP_2_DAYS", 12),
+        followup_3_days=_get_int("FOLLOWUP_3_DAYS", 22),
         excel_path=excel_path,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         daily_send_limit=_get_int("DAILY_SEND_LIMIT", 10),
