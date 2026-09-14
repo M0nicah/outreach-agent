@@ -50,6 +50,8 @@ app/
   contacts.py        finds REAL contact routes; AI only labels them
   campaigns.py       picks which of the 4 campaigns fits a company
   email_drafts.py    generates drafts + quality checks; sends nothing
+  approval.py        the human approval gate -- decides what may send
+  manual_send.py     export for sending by hand + sent tracking
 prompts/             AI prompt templates (Stage 3+)
 data/                the Excel workbook -- the database (Stage 2)
 tests/               unit tests
@@ -66,8 +68,9 @@ main.py              CLI entry point
 | 4  | 100-point scoring              | done |
 | 5  | Contact research               | done |
 | 6  | Email drafting                 | done |
-| 7  | Approval workflow              | next |
-| 8  | Gmail sending                  | |
+| 7  | Approval workflow              | done |
+| 7b | Manual sending + tracking      | done |
+| 8  | Gmail sending (optional)       | next |
 | 9  | Reply tracking                 | |
 | 10 | Follow-ups                     | |
 | 11 | Reporting                      | |
@@ -104,7 +107,66 @@ python main.py show-contacts    # list contacts found
 python main.py draft            # write drafts (PENDING; sends nothing)
 python main.py show-drafts        # list drafts
 python main.py show-drafts --full # read the full text of each draft
+
+python main.py review           # step through drafts, approve or reject
+python main.py check-approvals  # show exactly what would be sent
+
+python main.py export           # write approved emails to data/to_send.txt
+python main.py mark-sent O001   # record that you sent one by hand
 ```
+
+## Sending by hand
+
+Automated sending is optional. Sending the first emails yourself is a
+reasonable choice: you see how real employers reply before automating
+anything, and the first messages carry no risk of a technical mistake.
+
+```bash
+python main.py review      # approve the drafts you are happy with
+python main.py export      # writes data/to_send.txt
+# copy each block into Gmail and send it
+python main.py mark-sent O003 --note "sent via Gmail"
+```
+
+`export` only ever includes rows the approval gate permits, so sending by
+hand obeys exactly the same rule as automated sending would. `mark-sent`
+refuses to record an unapproved email as sent, and refuses to mark the
+same row twice.
+
+The export separates two cases, because they are genuinely different:
+
+- **Emails** -- an address was observed on the company's site, so you can
+  send directly.
+- **Applications** -- the organisation publishes a careers portal and no
+  address. You apply through their form; the drafted text usually fits
+  the "message" or "cover letter" field.
+
+`data/to_send.txt` is git-ignored, since it contains recipient addresses.
+
+## The approval gate
+
+One function, `app/approval.py:is_sendable()`, decides whether an email
+may be sent. Stage 8's sender calls it and does not reimplement it, so
+there is one place to audit.
+
+The rule:
+
+> If `Approval Status != APPROVED`, the email is NOT sent -- even if
+> `Email Status` says DRAFTED.
+
+It also refuses to send when the row was already SENT (duplicate), when a
+reply has arrived, or when the subject or body is empty.
+
+Approve either way you prefer:
+
+- **In Excel** -- type `APPROVED` in the Approval Status column. Case and
+  surrounding spaces are tolerated.
+- **In the terminal** -- `python main.py review` shows each draft and
+  asks.
+
+A value the system does not recognise, such as `APPROVE`, is **refused
+and reported**, never guessed. Run `check-approvals` to see the exact
+list of what would send before anything is sent.
 
 ## How drafts stay honest
 

@@ -16,6 +16,7 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
 
 from app import __version__, schema
 from app.config import Config, ConfigError, load_config
@@ -706,6 +707,264 @@ def cmd_show_drafts(config: Config, args) -> int:
     return 0
 
 
+def cmd_review(config: Config, args) -> int:
+    """Walk through pending drafts one at a time in the terminal.
+
+    Excel is still the source of truth -- this writes the same columns
+    you would edit by hand. It exists because reading a long email in a
+    spreadsheet cell is unpleasant, not because Excel is inadequate.
+    """
+    from app.approval import apply_decision
+    from app.excel import update_row
+
+    try:
+        outreach = read_outreach(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    pending = [
+        r for r in outreach
+        if str(r.get("Approval Status", "")).strip().upper() == schema.APPROVAL_PENDING
+    ]
+
+    if not pending:
+        print("\nNothing is PENDING review.")
+        print("Run `python main.py check-approvals` to see the current state.\n")
+        return 0
+
+    print(f"\n{len(pending)} draft(s) to review.")
+    print("For each one: [a]pprove  [r]eject  [s]kip  [q]uit\n")
+
+    approved = rejected = skipped = 0
+
+    for index, draft in enumerate(pending, start=1):
+        print("=" * 72)
+        print(f"({index}/{len(pending)})  {draft.get('Outreach ID')}  "
+              f"{draft.get('Company Name')}")
+        print(f"Campaign : {draft.get('Campaign')}")
+        if draft.get("Notes"):
+            print(f"\n!! {draft.get('Notes')}\n")
+        print("-" * 72)
+        print(f"Subject: {draft.get('Subject')}\n")
+        print(draft.get("Email Body"))
+        print("-" * 72)
+
+        try:
+            answer = input("[a]pprove  [r]eject  [s]kip  [q]uit > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nStopped.")
+            break
+
+        if answer.startswith("q"):
+            print("Stopped.")
+            break
+        if answer.startswith("a"):
+            decision = schema.APPROVAL_APPROVED
+            approved += 1
+        elif answer.startswith("r"):
+            decision = schema.APPROVAL_REJECTED
+            rejected += 1
+        else:
+            skipped += 1
+            print("Skipped -- still PENDING.\n")
+            continue
+
+        try:
+            update_row(
+                config.excel_path, schema.OUTREACH, draft["_row"],
+                apply_decision(draft, decision),
+            )
+            print(f"Set to {decision}.\n")
+        except ExcelError as exc:
+            logger.error("Could not save: %s", exc)
+            return 1
+
+    print(f"\nApproved {approved}, rejected {rejected}, skipped {skipped}.")
+    print("Run `python main.py check-approvals` to confirm what would send.\n")
+    return 0
+
+
+def cmd_check_approvals(config: Config, args) -> int:
+    """Show exactly what would be sent, and why everything else would not.
+
+    Run this before Stage 8 sending. It uses the same is_sendable()
+    function the sender will use, so what it reports is what will happen.
+    """
+    from app.approval import summarise
+
+    try:
+        outreach = read_outreach(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not outreach:
+        print("\nNo drafts yet. Run: python main.py draft\n")
+        return 0
+
+    result = summarise(outreach)
+
+    print(f"\n{'='*66}\n  APPROVAL STATUS\n{'='*66}\n")
+    print(f"  {len(outreach)} outreach row(s)\n")
+    for status, count in sorted(result["counts"].items()):
+        print(f"    {status:<12}: {count}")
+
+    if result["invalid"]:
+        print(f"\n  PROBLEMS -- these values are not recognised:\n")
+        for row, reason in result["invalid"]:
+            print(f"    {row.get('Outreach ID')}  {row.get('Company Name')[:28]}")
+            print(f"        {reason}")
+
+    print(f"\n  WOULD BE SENT: {len(result['sendable'])}\n")
+    for row in result["sendable"]:
+        print(f"    {row.get('Outreach ID')}  {str(row.get('Company Name'))[:30]:<32} "
+              f"{str(row.get('Subject'))[:40]}")
+
+    if result["blocked"]:
+        print(f"\n  WOULD NOT BE SENT: {len(result['blocked'])}\n")
+        for row, reason in result["blocked"]:
+            print(f"    {row.get('Outreach ID')}  {str(row.get('Company Name'))[:28]:<30} "
+                  f"{reason[:44]}")
+
+    print()
+    if result["sendable"]:
+        print("  Nothing has been sent -- sending is Stage 8 and does not exist yet.")
+    print()
+    return 0
+
+
+def cmd_export(config: Config, args) -> int:
+    """Export approved emails to a text file for manual sending.
+
+    Only rows the approval gate permits are exported, so sending by hand
+    obeys exactly the same rule as automated sending would.
+    """
+    from app.excel import read_settings
+    from app.manual_send import build_export, write_export_file
+
+    try:
+        outreach = read_outreach(config.excel_path)
+        contacts = read_contacts(config.excel_path)
+        settings = read_settings(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    by_email, by_portal = build_export(outreach, contacts, settings)
+
+    if not by_email and not by_portal:
+        print("\nNothing is approved yet.")
+        print("Approve drafts with `python main.py review`, then run this again.\n")
+        return 0
+
+    path = Path(args.output) if args.output else config.excel_path.parent / "to_send.txt"
+    from_address = str(settings.get("Email", "")).strip() or "(set Email in Settings)"
+
+    try:
+        written = write_export_file(path, by_email, by_portal, from_address)
+    except OSError as exc:
+        logger.error("Could not write %s: %s", path, exc)
+        return 1
+
+    print(f"\nWrote {written}")
+    print()
+    if by_email:
+        print(f"  {len(by_email)} email(s) to send from {from_address}:")
+        for entry in by_email:
+            print(f"    {entry['outreach_id']}  {entry['company'][:28]:<30} -> {entry['target']}")
+    if by_portal:
+        print(f"\n  {len(by_portal)} application(s) with no email address:")
+        for entry in by_portal:
+            print(f"    {entry['outreach_id']}  {entry['company'][:28]:<30} -> {entry['target'][:40]}")
+
+    print("\nAfter sending each one, record it:")
+    print("    python main.py mark-sent O001\n")
+    return 0
+
+
+def cmd_mark_sent(config: Config, args) -> int:
+    """Record that you sent an approved email by hand.
+
+    Refuses to mark anything that was not approved, so the workbook
+    cannot claim an unapproved email went out.
+    """
+    from app.approval import is_sendable
+    from app.excel import today, update_row
+    from app.manual_send import mark_sent_updates
+
+    try:
+        outreach = read_outreach(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    wanted = {i.strip().upper() for i in args.outreach_ids}
+    matched = [
+        r for r in outreach
+        if str(r.get("Outreach ID", "")).strip().upper() in wanted
+    ]
+
+    found_ids = {str(r.get("Outreach ID", "")).strip().upper() for r in matched}
+    for missing in sorted(wanted - found_ids):
+        logger.error("No outreach row with ID %s.", missing)
+
+    if not matched:
+        return 1
+
+    marked = 0
+    for row in matched:
+        outreach_id = row.get("Outreach ID")
+
+        # Already sent? Say so rather than overwriting the date.
+        if str(row.get("Email Status", "")).strip().upper() == schema.EMAIL_SENT:
+            print(f"  {outreach_id}: already marked as sent on {row.get('Date Sent')}.")
+            continue
+
+        allowed, reason = is_sendable(row)
+        if not allowed:
+            if not args.force:
+                logger.error(
+                    "%s was not approved (%s). Not marking it as sent.\n"
+                    "         If you really did send this email by hand, "
+                    "re-run with --force.",
+                    outreach_id, reason,
+                )
+                continue
+            # --force exists for one honest case: you sent the email
+            # yourself before approving it in the workbook. Recording
+            # reality is better than a workbook that disagrees with your
+            # sent folder. We still approve the row rather than leaving
+            # it inconsistent, and note that it happened.
+            logger.warning(
+                "%s was not approved (%s). Recording it as sent anyway "
+                "because --force was given.", outreach_id, reason,
+            )
+
+        updates = mark_sent_updates(today(), note=args.note or "")
+        if not allowed and args.force:
+            # Keep the two status columns consistent with what happened.
+            updates["Approval Status"] = schema.APPROVAL_APPROVED
+            updates["Date Approved"] = today()
+            existing_note = updates.get("Notes", "")
+            marker = "Sent manually before approval; recorded with --force."
+            updates["Notes"] = f"{existing_note} {marker}".strip()
+
+        try:
+            update_row(config.excel_path, schema.OUTREACH, row["_row"], updates)
+        except ExcelError as exc:
+            logger.error("Could not save: %s", exc)
+            return 1
+
+        print(f"  {outreach_id}: marked SENT on {today()}  ({row.get('Company Name')})")
+        marked += 1
+
+    if marked:
+        print(f"\nRecorded {marked} sent email(s).")
+        print("Follow-ups will be tracked from these dates in Stage 10.\n")
+    return 0
+
+
 def cmd_report(config: Config, args) -> int:
     """Show the score distribution and pipeline counts.
 
@@ -836,6 +1095,10 @@ COMMANDS = {
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
     "report": cmd_report,
+    "export": cmd_export,
+    "mark-sent": cmd_mark_sent,
+    "review": cmd_review,
+    "check-approvals": cmd_check_approvals,
     "draft": cmd_draft,
     "show-drafts": cmd_show_drafts,
     "find-contacts": cmd_find_contacts,
@@ -918,6 +1181,34 @@ def build_parser() -> argparse.ArgumentParser:
     draft_parser.add_argument(
         "--include-review", action="store_true",
         help="Also draft for NEEDS_REVIEW companies.",
+    )
+
+    subparsers.add_parser(
+        "review", help="Review pending drafts one at a time and approve or reject."
+    )
+    subparsers.add_parser(
+        "check-approvals", help="Show what would be sent, and why the rest would not."
+    )
+
+    export_parser = subparsers.add_parser(
+        "export", help="Write approved emails to a text file for manual sending."
+    )
+    export_parser.add_argument(
+        "--output", default=None,
+        help="Where to write the file (default: data/to_send.txt).",
+    )
+
+    sent_parser = subparsers.add_parser(
+        "mark-sent", help="Record that you sent an approved email by hand."
+    )
+    sent_parser.add_argument(
+        "outreach_ids", nargs="+", help="One or more Outreach IDs, e.g. O001 O003."
+    )
+    sent_parser.add_argument("--note", default=None, help="Optional note for the Notes column.")
+    sent_parser.add_argument(
+        "--force", action="store_true",
+        help="Record a send even if the row was not approved first "
+             "(for an email you genuinely sent by hand).",
     )
 
     drafts_parser = subparsers.add_parser("show-drafts", help="List or read drafts.")
