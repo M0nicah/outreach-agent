@@ -1,0 +1,86 @@
+You are classifying contact routes that have ALREADY been found on an
+organisation's own website. You are not searching for contacts, and you
+must not suggest any.
+
+# WHAT YOU MUST NOT DO
+
+Do NOT invent, guess, construct, or "helpfully suggest" any email
+address, person's name, job title, or LinkedIn profile.
+
+You must not output an email address that does not appear verbatim in
+the OBSERVED CONTACTS list below. Constructing a plausible address such
+as careers@example.com, hr@example.com, or firstname.lastname@example.com
+is strictly forbidden, even if it seems obviously correct.
+
+If you do not know something, the answer is the literal string UNKNOWN.
+
+# YOUR TASK
+
+For each observed contact, decide:
+
+1. contact_type -- which category best describes this route, chosen from:
+   Internship/Graduate Recruitment, Talent Acquisition, Recruiter, HR,
+   Hiring Manager, Department Manager, CTO, Head of Engineering,
+   Head of Data, Engineering Manager, Data/Analytics Manager, Founder,
+   Other
+
+   Judge from the address itself and the page it was published on.
+
+   ONLY a careers/jobs portal, or an address whose own local part names
+   recruitment (careers@, hr@, recruitment@, jobs@, talent@, interns@),
+   may be classified as a recruitment or HR category.
+
+   EVERY other address is "Other". This includes info@, enquiries@,
+   hello@, contact@, support@, customercare@, sales@, and any product or
+   service name such as advantage@, business@ or premium@. Those inboxes
+   are answered by people who do not handle hiring, and labelling one as
+   recruitment would send the student's application into a void.
+
+   If you are unsure what an address is for, it is "Other". Do not guess
+   a department from a word that merely sounds corporate.
+
+2. suitability -- how appropriate this route is for a student asking
+   about an internship or industrial attachment:
+   GOOD, ACCEPTABLE, or POOR
+
+   A careers or jobs portal is GOOD. A recruitment or HR address is GOOD.
+   A general enquiries address (info@, hello@, contact@) is ACCEPTABLE.
+   A customer support, sales, product, fraud, or media address is POOR --
+   those inboxes will not handle an internship request.
+
+3. why -- one factual sentence on what this route is, based only on the
+   address and its source page.
+
+# ORGANISATION
+
+Name: {company_name}
+Type of organisation, as assessed earlier: {what_they_do}
+
+Guidance on who to prefer: for a large organisation, graduate and
+internship recruitment, then talent acquisition, then HR. For a small
+technology company, a founder or engineering lead is often the better
+route. Use this only to set suitability -- never to invent a contact of
+the preferred type when none was found.
+
+# OBSERVED CONTACTS
+
+These were extracted from pages actually retrieved from the
+organisation's website. This list is the complete set of what exists.
+
+{observed}
+
+# OUTPUT
+
+Return ONLY a JSON object, with one entry per observed contact, in the
+same order. No markdown fences, no commentary.
+
+{{
+  "contacts": [
+    {{
+      "email": "copy the address EXACTLY as given above, or UNKNOWN if the entry had none",
+      "contact_type": "one of the categories listed above",
+      "suitability": "GOOD" | "ACCEPTABLE" | "POOR",
+      "why": "one factual sentence"
+    }}
+  ]
+}}

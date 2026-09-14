@@ -47,6 +47,7 @@ app/
   ai.py              provider layer (gemini / openai / mock)
   qualification.py   AI call + pydantic validation gate
   mock_ai.py         fake AI for free offline testing
+  contacts.py        finds REAL contact routes; AI only labels them
 prompts/             AI prompt templates (Stage 3+)
 data/                the Excel workbook -- the database (Stage 2)
 tests/               unit tests
@@ -60,9 +61,9 @@ main.py              CLI entry point
 | 1  | Project setup, config, logging | done |
 | 2  | Excel database (4 sheets)      | done |
 | 3  | AI company qualification       | done |
-| 4  | 100-point scoring              | next |
-| 5  | Contact research               | |
-| 6  | Email drafting                 | |
+| 4  | 100-point scoring              | done |
+| 5  | Contact research               | done |
+| 6  | Email drafting                 | next |
 | 7  | Approval workflow              | |
 | 8  | Gmail sending                  | |
 | 9  | Reply tracking                 | |
@@ -92,7 +93,33 @@ python main.py qualify          # the real thing (needs AI_API_KEY)
 python main.py qualify --limit 3   # only the first 3, to keep a first run cheap
 python main.py qualify --force  # re-do companies that already have a status
 python main.py show-results     # results table, best score first
+python main.py report           # score distribution and pipeline counts
+
+python main.py find-contacts    # find real contacts for QUALIFY companies
+python main.py find-contacts --include-review   # also NEEDS_REVIEW ones
+python main.py show-contacts    # list contacts found
 ```
+
+## How contact research stays honest
+
+The responsibilities are split so fabrication is structurally impossible:
+
+- **Python finds.** A regex extracts email addresses from pages we
+  actually fetched. Addresses on a third-party domain, and junk like
+  `noreply@`, are discarded.
+- **The AI only labels.** It is asked to classify what Python found. It
+  is never asked to produce an address.
+- **A guard enforces it.** Any email in the AI's reply that we did not
+  observe is discarded and logged as an error. The model can describe a
+  contact, never add one.
+
+`Contact Name` and `LinkedIn` are therefore almost always `UNKNOWN`, and
+that is correct: we do not scrape people, and a guessed name is worse
+than no name. A careers portal is recorded as a legitimate route in --
+for a large organisation it usually IS the right route.
+
+`Email Verified` says `OBSERVED`, meaning the address was published on
+the company's own site. It does not mean the mailbox was tested.
 
 ## AI provider
 

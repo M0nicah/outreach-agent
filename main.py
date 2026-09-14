@@ -24,6 +24,8 @@ from app.excel import (
     append_rows,
     create_workbook,
     read_companies,
+    read_contacts,
+    read_outreach,
     read_settings,
     validate_workbook,
 )
@@ -361,6 +363,236 @@ def cmd_qualify(config: Config, args) -> int:
     return 0
 
 
+def cmd_find_contacts(config: Config, args) -> int:
+    """Find real contact routes for qualified companies.
+
+    Only QUALIFY companies are processed by default -- there is no point
+    finding contacts for a company you will not email. Use --include-review
+    to cover NEEDS_REVIEW as well.
+    """
+    from app.contacts import (
+        build_contact_rows,
+        classify_contacts,
+        existing_contact_keys,
+        find_contacts,
+    )
+    from app.excel import next_id
+
+    if args.mock:
+        print("\nMOCK MODE -- contact classification is faked.\n")
+    elif not config.has_ai_key:
+        logger.error(
+            "No AI API key configured. Add AI_API_KEY to .env, or use --mock."
+        )
+        return 1
+
+    try:
+        ai_caller = get_ai_caller(config, use_mock=args.mock)
+    except AIError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        companies = read_companies(config.excel_path)
+        existing = read_contacts(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    wanted = {schema.RESEARCH_QUALIFY}
+    if args.include_review:
+        wanted.add(schema.RESEARCH_NEEDS_REVIEW)
+
+    queue = [
+        c for c in companies
+        if str(c.get("Research Status", "")).strip().upper() in wanted
+    ]
+    if args.limit:
+        queue = queue[: args.limit]
+
+    if not queue:
+        print(
+            f"\nNo companies with status {' or '.join(sorted(wanted))}. "
+            "Run `python main.py qualify` first,\nor add --include-review.\n"
+        )
+        return 0
+
+    seen_keys = existing_contact_keys(existing)
+    next_number = int(next_id(existing, "Contact ID", "P")[1:])
+
+    print(f"Searching for contacts at {len(queue)} company/companies...\n")
+
+    new_rows: list[dict] = []
+    for index, company in enumerate(queue):
+        name = str(company.get("Company Name", "?"))
+
+        if index > 0 and not args.mock and config.seconds_between_ai_calls:
+            time.sleep(config.seconds_between_ai_calls)
+
+        # Step 1: Python finds real contacts on real pages. No AI.
+        pack = research_company(name, str(company.get("Website", "")))
+        search = find_contacts(company, pack)
+
+        if not search.found_anything:
+            reason = search.notes[0] if search.notes else "nothing published"
+            print(f"  {name[:38]:<40} none found -- {reason[:44]}")
+            continue
+
+        # Step 2: the AI labels what was found. It cannot add anything.
+        search = classify_contacts(config, company, search, ai_caller)
+
+        rows = build_contact_rows(search, company, next_number, limit=args.per_company)
+
+        # Duplicate prevention, per your specification.
+        fresh = []
+        for row in rows:
+            email = str(row["Email"]).strip().lower()
+            key = (
+                str(row["Company ID"]),
+                email if email != schema.UNKNOWN.lower() else str(row["Source"]).lower(),
+            )
+            if key in seen_keys:
+                logger.info("%s: skipping contact already recorded (%s)", name, email)
+                continue
+            seen_keys.add(key)
+            fresh.append(row)
+
+        # Re-number after de-duplication so IDs stay contiguous.
+        for row in fresh:
+            row["Contact ID"] = f"P{next_number:03d}"
+            next_number += 1
+
+        new_rows.extend(fresh)
+        for row in fresh:
+            shown = row["Email"] if row["Email"] != schema.UNKNOWN else row["Source"]
+            print(f"  {name[:38]:<40} {str(row['Contact Type'])[:28]:<30} {shown[:44]}")
+
+    if not new_rows:
+        print("\nNo new contacts found.\n")
+        return 0
+
+    try:
+        append_rows(config.excel_path, schema.CONTACTS, new_rows)
+    except ExcelError as exc:
+        logger.error("Contacts could NOT be saved: %s", exc)
+        return 1
+
+    print(f"\nAdded {len(new_rows)} contact(s) to the Contacts sheet.")
+    print("Every email was observed on the company's own website -- none were guessed.")
+    print("\nNext: python main.py show-contacts\n")
+    return 0
+
+
+def cmd_show_contacts(config: Config, args) -> int:
+    """List the contacts found so far."""
+    try:
+        contacts = read_contacts(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not contacts:
+        print("\nNo contacts yet. Run: python main.py find-contacts\n")
+        return 0
+
+    print()
+    print(f"{'ID':<6} {'Company':<26} {'Type':<32} {'Email / route'}")
+    print("-" * 108)
+    for contact in contacts:
+        email = str(contact.get("Email", ""))
+        route = email if email and email != schema.UNKNOWN else str(contact.get("Source", ""))
+        print(
+            f"{str(contact.get('Contact ID','')):<6} "
+            f"{str(contact.get('Company Name',''))[:25]:<26} "
+            f"{str(contact.get('Contact Type',''))[:31]:<32} "
+            f"{route[:42]}"
+        )
+    print("-" * 108)
+    print(f"{len(contacts)} contacts\n")
+    return 0
+
+
+def cmd_report(config: Config, args) -> int:
+    """Show the score distribution and pipeline counts.
+
+    This is the Stage 4 reporting requirement: the scoring must be
+    transparent, so you can see at a glance how the 100 points were
+    spread rather than trusting a single total.
+    """
+    try:
+        companies = read_companies(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not companies:
+        print("\nNo companies yet. Run: python main.py load-samples\n")
+        return 0
+
+    by_status: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    for company in companies:
+        status = str(company.get("Research Status", "")).strip() or "(blank)"
+        by_status[status] = by_status.get(status, 0) + 1
+        priority = str(company.get("Priority", "")).strip()
+        if priority:
+            by_priority[priority] = by_priority.get(priority, 0) + 1
+
+    print(f"\n{'='*54}\n  PIPELINE REPORT\n{'='*54}")
+    print(f"\n  Companies: {len(companies)}\n")
+    for status in [
+        schema.RESEARCH_QUALIFY, schema.RESEARCH_NEEDS_REVIEW,
+        schema.RESEARCH_REJECT, schema.RESEARCH_PENDING, schema.RESEARCH_ERROR,
+    ]:
+        if status in by_status:
+            print(f"    {status:<14}: {by_status[status]}")
+
+    if by_priority:
+        print("\n  Priority bands")
+        for band in ["A", "B", "C", "D", schema.RESEARCH_NEEDS_REVIEW, "REJECT"]:
+            if band in by_priority:
+                print(f"    {band:<14}: {by_priority[band]}")
+
+    # Average score per dimension, across companies that were actually
+    # scored. This is what makes the scoring transparent: if one dimension
+    # is always near zero, the prompt or the weighting needs attention.
+    dimensions = [
+        ("Technology Score", 25), ("Internship Score", 25),
+        ("Skills Match Score", 20), ("Maturity Score", 10),
+        ("Contactability Score", 10), ("Geographic Score", 10),
+    ]
+    scored = [
+        c for c in companies
+        if isinstance(c.get("Total Score"), (int, float)) and c.get("Total Score") != ""
+    ]
+    if scored:
+        print(f"\n  Average scores ({len(scored)} scored companies)")
+        for column, maximum in dimensions:
+            values = [
+                c[column] for c in scored if isinstance(c.get(column), (int, float))
+            ]
+            if values:
+                average = sum(values) / len(values)
+                filled = int(round(average / maximum * 20))
+                bar = "#" * filled + "." * (20 - filled)
+                print(f"    {column:<22} {bar} {average:5.1f}/{maximum}")
+
+        totals = [c["Total Score"] for c in scored]
+        print(f"\n    {'TOTAL':<22} {'':<20} {sum(totals)/len(totals):5.1f}/100")
+
+    # Stage counts for the rest of the pipeline, once those sheets fill up.
+    try:
+        contacts = read_contacts(config.excel_path)
+        outreach = read_outreach(config.excel_path)
+        print(f"\n  Contacts found   : {len(contacts)}")
+        print(f"  Outreach drafted : {len(outreach)}")
+    except ExcelError:
+        pass
+
+    print()
+    return 0
+
+
 def cmd_show_results(config: Config, args) -> int:
     """Show qualification results, highest score first."""
     try:
@@ -409,6 +641,9 @@ COMMANDS = {
     "fix-urls": cmd_fix_urls,
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
+    "report": cmd_report,
+    "find-contacts": cmd_find_contacts,
+    "show-contacts": cmd_show_contacts,
 }
 
 
@@ -461,6 +696,23 @@ def build_parser() -> argparse.ArgumentParser:
         "fix-urls", help="Sync corrected websites from sample_data into the workbook."
     )
     subparsers.add_parser("show-results", help="Show qualification results.")
+    subparsers.add_parser("report", help="Score distribution and pipeline counts.")
+
+    contacts_parser = subparsers.add_parser(
+        "find-contacts", help="Find real contact routes for qualified companies."
+    )
+    contacts_parser.add_argument("--mock", action="store_true", help="Fake the AI labelling.")
+    contacts_parser.add_argument("--limit", type=int, default=None, help="Only the first N companies.")
+    contacts_parser.add_argument(
+        "--include-review", action="store_true",
+        help="Also search NEEDS_REVIEW companies, not just QUALIFY.",
+    )
+    contacts_parser.add_argument(
+        "--per-company", type=int, default=3,
+        help="Maximum contacts to record per company (default 3).",
+    )
+
+    subparsers.add_parser("show-contacts", help="List contacts found so far.")
 
     return parser
 
