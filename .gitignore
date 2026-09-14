@@ -21,3 +21,13 @@ venv/
 
 # Exported emails awaiting manual sending (contains recipient addresses)
 data/to_send.txt
+
+# Workbook backups (created automatically before bulk operations)
+data/backups/
+
+# Generated discovery output
+data/discovered.csv
+COMMANDS.md
+
+# Application documents (contain personal contact details)
+applications/

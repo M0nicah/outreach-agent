@@ -1,0 +1,62 @@
+Decide which of these search results are organisations worth researching
+as a possible internship or industrial attachment host for a student.
+
+# THE STUDENT
+
+{student_profile}
+
+# YOUR JOB
+
+These results came from a real web search. Each is a real website. Your
+only job is to say which ones are worth researching further.
+
+You must NOT invent organisations, add ones that are not listed, or
+change a URL. Work only with the list below.
+
+# KEEP
+
+Organisations that plausibly have a professional technology, data,
+software, engineering, research or IT function a student could learn
+inside. For example: software and data companies, fintech, telecoms,
+banks and insurers with internal tech teams, health and edtech, research
+institutes, universities, NGOs with real data or technology operations,
+technology consultancies, and startups with genuine technical work.
+
+Smallness is not a reason to drop something.
+
+# DROP
+
+- Anything that is not an organisation's own website: directories, job
+  boards, news articles, blog posts, social media, Wikipedia.
+- Shops and services with no professional technology function: cyber
+  cafes, computer or phone repair, electronics retail, printing shops,
+  mobile money kiosks.
+- Individual freelancers and personal portfolio sites.
+- Companies clearly based outside {country}, unless they obviously have
+  an office there.
+- Anything where you cannot tell what the organisation does. Say so
+  rather than guessing.
+
+A technology-sounding name means nothing on its own. Judge from the
+title and description what the organisation actually does.
+
+# THE RESULTS
+
+{results}
+
+# OUTPUT
+
+Return ONLY a JSON object. Include an entry for each result you want to
+KEEP, using the exact index number and URL given above. No markdown
+fences, no commentary.
+
+{{
+  "keep": [
+    {{
+      "index": the number of the result,
+      "name": "the organisation's name, tidied from the title -- do not invent one",
+      "sector": "a short label, e.g. Fintech, Health data, University, NGO",
+      "why": "one short factual sentence on why this is worth researching"
+    }}
+  ]
+}}

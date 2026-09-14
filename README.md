@@ -47,6 +47,7 @@ app/
   ai.py              provider layer (gemini / openai / mock)
   qualification.py   AI call + pydantic validation gate
   mock_ai.py         fake AI for free offline testing
+  discover.py        finds new organisations via real web search
   contacts.py        finds REAL contact routes; AI only labels them
   campaigns.py       picks which of the 4 campaigns fits a company
   email_drafts.py    generates drafts + quality checks; sends nothing
@@ -54,6 +55,7 @@ app/
   manual_send.py     export for sending by hand + sent tracking
   followups.py       follow-up schedule and drafting; stops on reply
   gmail.py           OAuth + sending, with every safety limit enforced
+  replies.py         finds replies in Gmail and classifies them
 prompts/             AI prompt templates (Stage 3+)
 data/                the Excel workbook -- the database (Stage 2)
 tests/               unit tests
@@ -73,7 +75,7 @@ main.py              CLI entry point
 | 7  | Approval workflow              | done |
 | 7b | Manual sending + tracking      | done |
 | 8  | Gmail sending                  | done |
-| 9  | Reply tracking                 | |
+| 9  | Reply tracking                 | done |
 | 10 | Follow-ups                     | done |
 | 11 | Reporting                      | |
 | 12 | Optional Streamlit dashboard   | |
@@ -88,10 +90,14 @@ main.py              CLI entry point
 
 ## Commands
 
+See **[COMMANDS.md](COMMANDS.md)** for the full reference, grouped by task.
+
+
 ```bash
 python main.py                  # status + workbook summary
 python main.py init-excel       # create the workbook (refuses to overwrite)
 python main.py load-samples     # add 10 test companies (skips duplicates)
+python main.py import-companies data/my_companies.csv   # add your own
 python main.py show-companies   # list them as a table
 python main.py check-excel      # validate structure, list unfilled settings
 
@@ -123,7 +129,36 @@ python main.py mark-followup O003 1   # record that you sent follow-up 1
 python main.py gmail-auth       # authorise Gmail (opens your browser once)
 python main.py gmail-test       # send ONE test email to your own address
 python main.py send             # send approved emails
+python main.py check-replies    # find replies and classify them
 ```
+
+## Reply tracking
+
+```bash
+python main.py check-replies            # last 90 days
+python main.py check-replies --days 14  # just the last fortnight
+```
+
+Detection and classification are kept separate on purpose:
+
+- **Detection** is factual -- a Gmail search for messages from the
+  addresses you emailed. No AI involved.
+- **Classification** is judgement, and can be wrong.
+
+So if classification fails, the reply is still recorded (as `OTHER`,
+flagged for you to read). Missing a reply entirely is far worse than
+mislabelling one.
+
+Replies are classified as POSITIVE, NEGATIVE, REFERRAL, CV_REQUEST,
+INTERVIEW or OTHER, each with a summary and a concrete next action. A
+polite brush-off is classified NEGATIVE -- the prompt is explicit that it
+should read what they mean, not what you would like them to mean.
+
+Bounces and out-of-office replies are detected from their text and
+handled without spending an AI call.
+
+**Recording a reply automatically stops that thread's follow-ups**, since
+`followups.has_replied()` reads the same Reply Status column.
 
 ## Gmail setup
 
@@ -332,6 +367,31 @@ The AI never researches from memory. The sequence is:
 Some real sites block automated access or render via JavaScript. Those
 are recorded as "no evidence retrieved", which leads to `NEEDS_REVIEW` --
 never `REJECT`. A company we could not look at is not a bad company.
+
+## Adding companies
+
+The quickest way to grow the list is a CSV:
+
+```csv
+Company Name,Website,Country,Region,Industry,Source
+Acme Data Ltd,https://acmedata.co.ke,Kenya,Nairobi,Data analytics,Careers fair
+```
+
+```bash
+python main.py import-companies data/my_companies.csv
+```
+
+Only `Company Name` is required. Any other column matching a
+Companies-sheet heading is imported; unknown columns are ignored with a
+warning. Companies already in the workbook are skipped by name, so you
+can re-run it after editing the file.
+
+Everything imported starts as `PENDING` -- nothing is assumed researched.
+
+**Check the website actually loads before adding it.** The single biggest
+cause of a `NEEDS_REVIEW` with no contact is a dead or blocked domain:
+the system cannot research what it cannot fetch, and it will correctly
+refuse to guess.
 
 ## The workbook
 

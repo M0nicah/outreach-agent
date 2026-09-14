@@ -258,6 +258,43 @@ def read_settings(path: Path) -> dict[str, str]:
 
 # --- Writing ---------------------------------------------------------------
 
+def backup(path: Path, tag: str = "") -> Path | None:
+    """Copy the workbook to data/backups/ before a bulk change.
+
+    Cheap insurance. The workbook is the only copy of your research, and
+    a bulk operation that goes wrong should never be unrecoverable.
+    """
+    import shutil
+    from datetime import datetime
+
+    if not path.exists():
+        return None
+
+    backup_dir = path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = f"-{tag}" if tag else ""
+    destination = backup_dir / f"{path.stem}-{stamp}{suffix}.xlsx"
+
+    try:
+        shutil.copy2(path, destination)
+    except OSError as exc:
+        logger.warning("Could not write a backup: %s", exc)
+        return None
+
+    # Keep the 20 most recent; older ones are rarely useful.
+    backups = sorted(backup_dir.glob(f"{path.stem}-*.xlsx"))
+    for old in backups[:-20]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    logger.debug("Backed up the workbook to %s", destination)
+    return destination
+
+
 def append_rows(path: Path, sheet_name: str, records: list[dict[str, Any]]) -> int:
     """Append records to a sheet, matching dict keys to column headers.
 
@@ -338,6 +375,12 @@ def update_rows(
 
     Opening and saving an .xlsx file is slow. When Stage 3 qualifies ten
     companies we want one save, not ten, so this batches them.
+
+    IMPORTANT: this opens the workbook NOW and saves immediately. Never
+    hold an open Workbook across slow work (web fetches, AI calls) and
+    save it afterwards -- anything written to the file in the meantime
+    would be silently overwritten. That bug cost 32 rows once; the fix
+    is to gather your changes in a plain dict and call this at the end.
 
     Returns the number of rows updated.
     """

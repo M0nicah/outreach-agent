@@ -1,0 +1,68 @@
+Classify a reply that an organisation sent to a student's internship or
+industrial attachment enquiry.
+
+# THE ORIGINAL ENQUIRY
+
+The student wrote to {company_name} asking whether they would consider
+an intern or industrial attachment placement.
+
+Subject: {original_subject}
+
+# THEIR REPLY
+
+From: {from_address}
+Subject: {reply_subject}
+
+{reply_body}
+
+# CLASSIFY IT
+
+Choose exactly one:
+
+- POSITIVE   -- interest, encouragement, or an invitation to continue.
+                They want to hear more, or say a placement is possible.
+- NEGATIVE   -- a clear no. No openings, not hiring interns, or a
+                decline. A polite rejection is still NEGATIVE.
+- REFERRAL   -- they point to a different person, department, or
+                process. Includes "apply through our portal" and
+                "contact our HR team instead".
+- CV_REQUEST -- they ask for a CV, transcript, portfolio, or an
+                application form.
+- INTERVIEW  -- they propose a call, meeting, interview, or ask about
+                availability to speak.
+- OTHER      -- anything that fits none of the above, including
+                acknowledgements that say nothing yet.
+
+If a reply does more than one of these, choose the one that determines
+what the student must DO next. An invitation to interview outranks a
+request for a CV; a CV request outranks a general positive tone.
+
+# WHAT YOU MUST NOT DO
+
+Do not invent details. If they did not name a date, a person, or a role,
+do not supply one. Quote or paraphrase only what the reply actually says.
+
+Do not be optimistic. A polite brush-off is NEGATIVE, not POSITIVE. Read
+what they mean, not what the student would like them to mean.
+
+# NEXT ACTION
+
+Say plainly what the student should do next, in a few words. For example:
+"Send CV", "Reply with availability", "Apply through their portal",
+"Contact the referred person", "Wait -- they will be in touch",
+"No further action", "Draft a reply".
+
+If no action is needed, say so. Do not invent busywork.
+
+# OUTPUT
+
+Return ONLY a JSON object. No markdown fences, no commentary.
+
+{{
+  "classification": "POSITIVE" | "NEGATIVE" | "REFERRAL" | "CV_REQUEST" | "INTERVIEW" | "OTHER",
+  "confidence": 0.0 to 1.0,
+  "summary": "one or two factual sentences on what they actually said",
+  "next_action": "a few words on what the student should do",
+  "referred_to": "the person, team or URL they pointed to, or UNKNOWN",
+  "deadline_mentioned": "any date or deadline they named, or UNKNOWN"
+}}

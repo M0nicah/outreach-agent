@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from app import __version__, schema
-from app.config import Config, ConfigError, load_config
+from app.config import PROJECT_ROOT, Config, ConfigError, load_config
 from app.excel import (
     ExcelError,
     append_rows,
@@ -189,6 +189,340 @@ def cmd_fix_urls(config: Config, args) -> int:
     return 0
 
 
+# Ready-made searches for the kinds of organisation worth approaching.
+# Used by `discover --preset`.
+SEARCH_PRESETS = {
+    "data": [
+        "data analytics companies Nairobi Kenya",
+        "business intelligence company Kenya",
+        "data science company Nairobi",
+    ],
+    "software": [
+        "software development company Nairobi Kenya",
+        "software engineering firm Kenya careers",
+        "web application development company Nairobi",
+    ],
+    "startups": [
+        "Kenyan tech startups Nairobi hiring",
+        "Nairobi startup engineering team careers",
+        "fintech startup Kenya careers",
+    ],
+    "ngo": [
+        "NGO Kenya data analysis monitoring evaluation jobs",
+        "international NGO Nairobi data team",
+        "humanitarian organisation Kenya data science",
+    ],
+    "research": [
+        "research institute Kenya data science",
+        "Kenya research organisation internship students",
+    ],
+    "health": [
+        "health technology company Kenya",
+        "digital health company Nairobi",
+    ],
+}
+
+
+def cmd_discover(config: Config, args) -> int:
+    """Find new organisations through a real web search.
+
+    Results come from a search index, not from the AI's memory. Every
+    candidate's website is checked before it is offered, so the workbook
+    does not fill up with domains that cannot be researched.
+    """
+    from app.discover import (
+        DUCKDUCKGO_DELAY,
+        DiscoverError,
+        existing_domains,
+        search,
+        to_candidates,
+        verify_reachable,
+    )
+    from app.excel import read_settings
+
+    # Work out what to search for.
+    if args.preset:
+        queries = SEARCH_PRESETS.get(args.preset)
+        if not queries:
+            logger.error(
+                "Unknown preset %r. Available: %s",
+                args.preset, ", ".join(sorted(SEARCH_PRESETS)),
+            )
+            return 1
+    elif args.query:
+        queries = [" ".join(args.query)]
+    else:
+        logger.error(
+            "Give a search, or a preset.\n"
+            "    python main.py discover \"data analytics companies Nairobi\"\n"
+            "    python main.py discover --preset startups\n"
+            "  Presets: %s", ", ".join(sorted(SEARCH_PRESETS)),
+        )
+        return 1
+
+    try:
+        companies = read_companies(config.excel_path)
+        settings = read_settings(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    known = existing_domains(companies)
+
+    # 1. Search. Real results, from a real index.
+    all_candidates = []
+    seen = set()
+    for query in queries:
+        print(f"\n  Searching: {query}")
+        try:
+            results = search(config, query, count=args.count, engine=args.engine)
+        except DiscoverError as exc:
+            logger.error("%s", exc)
+            return 1
+
+        for candidate in to_candidates(results, query):
+            if candidate.domain in known:
+                logger.debug("%s already in the workbook.", candidate.domain)
+                continue
+            if candidate.domain in seen:
+                continue
+            seen.add(candidate.domain)
+            all_candidates.append(candidate)
+
+        # Pace the queries. DuckDuckGo has no published limit but will
+        # block a burst, and Brave's free credit allows about one a second.
+        if len(queries) > 1:
+            time.sleep(DUCKDUCKGO_DELAY if args.engine == "duckduckgo" else 1.2)
+
+    if not all_candidates:
+        print("\n  No new organisations found. They may all be in the workbook "
+              "already.\n")
+        return 0
+
+    print(f"\n  {len(all_candidates)} new candidate(s) found.")
+
+    # 2. Screen with the AI -- it judges the real results, and cannot add
+    #    anything of its own.
+    if args.no_screen:
+        kept = all_candidates
+    else:
+        if not config.has_ai_key:
+            logger.warning("No AI key set -- skipping screening.")
+            kept = all_candidates
+        else:
+            kept = _screen_candidates(config, all_candidates, settings)
+            print(f"  {len(kept)} kept after screening.")
+
+    if not kept:
+        print("\n  Nothing worth adding.\n")
+        return 0
+
+    # 3. Verify each site actually loads. An unreachable domain can never
+    #    be researched, so adding it only creates a dead row.
+    print(f"\n  Checking {len(kept)} website(s) load...\n")
+    reachable = []
+    for candidate in kept:
+        ok, note = verify_reachable(candidate)
+        mark = "ok  " if ok else "DEAD"
+        print(f"    {mark}  {candidate.name[:34]:<36} {candidate.url[:38]}")
+        if ok:
+            reachable.append(candidate)
+
+    if not reachable:
+        print("\n  None of the websites could be reached.\n")
+        return 0
+
+    # 4. Write a CSV for you to review before importing.
+    import csv
+
+    output = Path(args.output) if args.output else config.excel_path.parent / "discovered.csv"
+    try:
+        with output.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["Company Name", "Website", "Country", "Region", "Industry", "Source"]
+            )
+            for candidate in reachable:
+                writer.writerow([
+                    candidate.name, candidate.url, args.country, args.region,
+                    getattr(candidate, "sector", ""), f"Search: {candidate.query}",
+                ])
+    except OSError as exc:
+        logger.error("Could not write %s: %s", output, exc)
+        return 1
+
+    print(f"\n  Wrote {len(reachable)} organisation(s) to {output}")
+    print("\n  READ IT FIRST, delete any you do not want, then:")
+    print(f"      python main.py import-companies {output}")
+    print("      python main.py qualify\n")
+    return 0
+
+
+def _screen_candidates(config: Config, candidates: list, settings: dict) -> list:
+    """Ask the AI which candidates are worth researching.
+
+    It sees only the real search results and may keep or drop them. It
+    cannot add an organisation, because we match its answers back to the
+    original list by index.
+    """
+    from app.email_drafts import format_student_profile
+    from app.qualification import extract_json
+
+    prompt_path = PROJECT_ROOT / "prompts" / "discover.txt"
+    if not prompt_path.exists():
+        logger.warning("Screening prompt missing -- keeping all candidates.")
+        return candidates
+
+    listing = "\n\n".join(
+        f"{index}. {c.name}\n   URL: {c.url}\n   {c.description[:220]}"
+        for index, c in enumerate(candidates)
+    )
+
+    prompt = prompt_path.read_text(encoding="utf-8").format(
+        student_profile=format_student_profile(settings),
+        country=settings.get("Preferred Locations") or "Kenya",
+        results=listing,
+    )
+
+    try:
+        raw = get_ai_caller(config)(config, prompt)
+        data = extract_json(raw)
+    except Exception as exc:
+        logger.warning("Screening failed (%s) -- keeping all candidates.", exc)
+        return candidates
+
+    kept = []
+    for entry in data.get("keep", []):
+        try:
+            index = int(entry.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= index < len(candidates):
+            # The model referred to something that is not in the list.
+            logger.warning("Screening returned index %s, which does not exist.", index)
+            continue
+
+        candidate = candidates[index]
+        # Take the tidied name only if it plausibly refers to the same
+        # organisation; otherwise keep what the real page said.
+        suggested = str(entry.get("name", "")).strip()
+        if suggested:
+            candidate.name = suggested[:80]
+        candidate.sector = str(entry.get("sector", "")).strip()
+        kept.append(candidate)
+
+    return kept
+
+
+def cmd_import_companies(config: Config, args) -> int:
+    """Add companies to the workbook from a CSV file.
+
+    The CSV needs at minimum a "Company Name" column. Any other column
+    matching a Companies-sheet heading is imported too; unknown columns
+    are ignored with a warning rather than silently dropped.
+
+    Companies already in the workbook are skipped by name, so you can
+    re-run this safely after editing the file.
+    """
+    import csv
+
+    from app.excel import next_id, today
+
+    path = Path(args.csv_path)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+
+    if not path.exists():
+        logger.error(
+            "CSV not found: %s\n"
+            "         It needs a header row with at least a 'Company Name' column.",
+            path,
+        )
+        return 1
+
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.DictReader(handle))
+    except (OSError, csv.Error) as exc:
+        logger.error("Could not read %s: %s", path, exc)
+        return 1
+
+    if not rows:
+        print(f"\n  {path} has no data rows.\n")
+        return 0
+
+    if "Company Name" not in rows[0]:
+        logger.error(
+            "The CSV has no 'Company Name' column. Found: %s",
+            ", ".join(rows[0].keys()),
+        )
+        return 1
+
+    unknown = set(rows[0].keys()) - set(schema.COMPANY_COLUMNS)
+    if unknown:
+        logger.warning(
+            "Ignoring column(s) that are not on the Companies sheet: %s",
+            ", ".join(sorted(unknown)),
+        )
+
+    try:
+        existing = read_companies(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    existing_names = {
+        str(c.get("Company Name", "")).strip().lower() for c in existing
+    }
+
+    next_number = int(next_id(existing, "Company ID", "C")[1:])
+    new_rows = []
+    skipped = []
+
+    for row in rows:
+        name = str(row.get("Company Name", "")).strip()
+        if not name:
+            continue
+        if name.lower() in existing_names:
+            skipped.append(name)
+            continue
+
+        record = {
+            column: str(row.get(column, "")).strip()
+            for column in schema.COMPANY_COLUMNS
+            if row.get(column)
+        }
+        record["Company ID"] = f"C{next_number:03d}"
+        record["Company Name"] = name
+        # Nothing has been researched yet, and the workbook must not
+        # imply otherwise.
+        record["Research Status"] = schema.RESEARCH_PENDING
+        record.setdefault("Source", f"Imported from {path.name}")
+        record["Date Added"] = today()
+
+        new_rows.append(record)
+        existing_names.add(name.lower())
+        next_number += 1
+
+    if skipped:
+        print(f"\n  Skipped {len(skipped)} company/companies already in the workbook.")
+
+    if not new_rows:
+        print("\n  Nothing new to import.\n")
+        return 0
+
+    try:
+        append_rows(config.excel_path, schema.COMPANIES, new_rows)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  Imported {len(new_rows)} company/companies, all PENDING.")
+    print(f"  Total in workbook: {len(existing) + len(new_rows)}")
+    print("\n  Next: python main.py qualify\n")
+    return 0
+
+
 def cmd_show_companies(config: Config, args) -> int:
     """Print the companies as a readable table."""
     try:
@@ -298,6 +632,14 @@ def cmd_qualify(config: Config, args) -> int:
         print("\nNothing to qualify. All companies already have a status.")
         print("Use --force to re-qualify them.\n")
         return 0
+
+    # Back up before a bulk change: the workbook is the only copy of
+    # your research, and a long run that goes wrong should be recoverable.
+    from app.excel import backup
+
+    saved = backup(config.excel_path, "qualify")
+    if saved:
+        logger.info("Backed up the workbook to %s", saved.name)
 
     print(f"Qualifying {len(queue)} company/companies...\n")
 
@@ -420,6 +762,14 @@ def cmd_find_contacts(config: Config, args) -> int:
 
     seen_keys = existing_contact_keys(existing)
     next_number = int(next_id(existing, "Contact ID", "P")[1:])
+
+    # Back up before a bulk change: the workbook is the only copy of
+    # your research, and a long run that goes wrong should be recoverable.
+    from app.excel import backup
+
+    saved = backup(config.excel_path, "contacts")
+    if saved:
+        logger.info("Backed up the workbook to %s", saved.name)
 
     print(f"Searching for contacts at {len(queue)} company/companies...\n")
 
@@ -596,6 +946,14 @@ def cmd_draft(config: Config, args) -> int:
         )
         return 0
 
+    # Back up before a bulk change: the workbook is the only copy of
+    # your research, and a long run that goes wrong should be recoverable.
+    from app.excel import backup
+
+    saved = backup(config.excel_path, "draft")
+    if saved:
+        logger.info("Backed up the workbook to %s", saved.name)
+
     print(f"Drafting {len(queue)} email(s)...\n")
 
     new_rows: list[dict] = []
@@ -661,6 +1019,103 @@ def cmd_draft(config: Config, args) -> int:
         print(f"{flagged} draft(s) were flagged for quality -- see the Notes column.")
     print("\nNext: python main.py show-drafts")
     print("Then review them in Excel and set Approval Status to APPROVED.\n")
+    return 0
+
+
+def cmd_log_application(config: Config, args) -> int:
+    """Record an application you made outside this system.
+
+    Real job hunting does not happen only inside one tool. If you applied
+    through a company's portal, or emailed someone before drafting
+    anything here, this records it so the workbook stays the honest
+    source of truth -- and so follow-up tracking and duplicate prevention
+    still work for that company.
+    """
+    from app.excel import next_id, today, update_row
+
+    try:
+        companies = read_companies(config.excel_path)
+        contacts = read_contacts(config.excel_path)
+        outreach = read_outreach(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    needle = args.company.strip().lower()
+    matches = [
+        c for c in companies
+        if needle in str(c.get("Company Name", "")).strip().lower()
+    ]
+
+    if not matches:
+        logger.error("No company matching %r. Try `python main.py show-companies`.",
+                     args.company)
+        return 1
+    if len(matches) > 1:
+        logger.error(
+            "%r matches %d companies: %s. Be more specific.",
+            args.company, len(matches),
+            ", ".join(str(c.get("Company Name")) for c in matches[:5]),
+        )
+        return 1
+
+    company = matches[0]
+    company_id = str(company.get("Company ID", ""))
+    name = str(company.get("Company Name", ""))
+
+    # Already logged? Do not create a second record for the same company.
+    existing = [
+        r for r in outreach
+        if str(r.get("Company ID", "")).strip() == company_id
+    ]
+    if existing and not args.again:
+        row = existing[0]
+        print(f"\n  {name} already has an outreach record "
+              f"({row.get('Outreach ID')}, {row.get('Email Status')}).")
+        print("  Use --again if you really did contact them a second time.\n")
+        return 0
+
+    # Use a known contact if there is one, so replies can be matched later.
+    company_contacts = [
+        c for c in contacts
+        if str(c.get("Company ID", "")).strip() == company_id
+    ]
+    contact = company_contacts[0] if company_contacts else {}
+
+    when = args.date or today()
+    outreach_id = next_id(outreach, "Outreach ID", "O")
+
+    record = {
+        "Outreach ID": outreach_id,
+        "Company ID": company_id,
+        "Contact ID": contact.get("Contact ID", schema.UNKNOWN),
+        "Company Name": name,
+        "Contact Name": contact.get("Contact Name", schema.UNKNOWN),
+        "Campaign": args.campaign or "Applied outside the system",
+        "Subject": args.subject or f"Application to {name}",
+        "Email Body": (
+            "Recorded manually. This application was made outside this system "
+            f"({args.how}), so the exact text is not stored here."
+        ),
+        # It genuinely went out, so it is approved and sent.
+        "Approval Status": schema.APPROVAL_APPROVED,
+        "Email Status": schema.EMAIL_SENT,
+        "Date Drafted": when,
+        "Date Approved": when,
+        "Date Sent": when,
+        "Reply Status": schema.REPLY_NONE,
+        "Notes": f"Logged manually: {args.how}",
+    }
+
+    try:
+        append_rows(config.excel_path, schema.OUTREACH, [record])
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  Recorded {outreach_id}: {name}, {args.how}, on {when}.")
+    print("  Follow-ups for this company will now be tracked from that date.")
+    print("  It will not be drafted again.\n")
     return 0
 
 
@@ -785,6 +1240,22 @@ def cmd_review(config: Config, args) -> int:
     return 0
 
 
+def _warn_if_open_in_excel(config: Config) -> None:
+    """Warn when the workbook looks open in Excel.
+
+    Excel keeps edits in memory until you save, so a command can read a
+    file that does not yet contain the approvals you just typed. The
+    lock file ~$name.xlsx exists while the workbook is open.
+    """
+    lock = config.excel_path.parent / f"~${config.excel_path.name}"
+    if lock.exists():
+        logger.warning(
+            "The workbook appears to be OPEN in Excel. Any edits you have not "
+            "saved will not be visible here. Press Cmd+S and close it, then "
+            "run this again."
+        )
+
+
 def cmd_check_approvals(config: Config, args) -> int:
     """Show exactly what would be sent, and why everything else would not.
 
@@ -792,6 +1263,8 @@ def cmd_check_approvals(config: Config, args) -> int:
     function the sender will use, so what it reports is what will happen.
     """
     from app.approval import summarise
+
+    _warn_if_open_in_excel(config)
 
     try:
         outreach = read_outreach(config.excel_path)
@@ -815,6 +1288,15 @@ def cmd_check_approvals(config: Config, args) -> int:
         for row, reason in result["invalid"]:
             print(f"    {row.get('Outreach ID')}  {row.get('Company Name')[:28]}")
             print(f"        {reason}")
+
+    if not result["sendable"]:
+        pending = result["counts"].get(schema.APPROVAL_PENDING, 0)
+        if pending:
+            print(f"\n  Nothing is approved yet ({pending} still PENDING).")
+            print("\n  To approve:")
+            print("      python main.py review          (in the terminal)")
+            print("      or type APPROVED in the Approval Status column in Excel,")
+            print("      then press Cmd+S and CLOSE the file before running commands.")
 
     print(f"\n  WOULD BE SENT: {len(result['sendable'])}\n")
     for row in result["sendable"]:
@@ -1281,6 +1763,8 @@ def cmd_send(config: Config, args) -> int:
     )
     from app.manual_send import SendRoute, resolve_route
 
+    _warn_if_open_in_excel(config)
+
     try:
         outreach = read_outreach(config.excel_path)
         contacts = read_contacts(config.excel_path)
@@ -1422,6 +1906,140 @@ def cmd_send(config: Config, args) -> int:
     return 0
 
 
+def cmd_check_replies(config: Config, args) -> int:
+    """Search Gmail for replies, classify them, and update the workbook.
+
+    Recording a reply automatically stops that thread's follow-up
+    sequence, because followups.has_replied() reads the Reply Status
+    column this writes.
+    """
+    from app.excel import update_row
+    from app.gmail import GmailError, authenticate
+    from app.replies import (
+        ReplyError,
+        classify_reply,
+        fetch_replies,
+        match_to_outreach,
+        reply_updates,
+    )
+
+    try:
+        outreach = read_outreach(config.excel_path)
+        contacts = read_contacts(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    sent_rows = [
+        r for r in outreach
+        if str(r.get("Email Status", "")).strip().upper() == schema.EMAIL_SENT
+    ]
+    if not sent_rows:
+        print("\n  No emails have been sent yet, so there is nothing to check.\n")
+        return 0
+
+    # Only look for replies from people we actually emailed.
+    sent_contact_ids = {str(r.get("Contact ID", "")).strip() for r in sent_rows}
+    addresses = [
+        str(c.get("Email", "")).strip()
+        for c in contacts
+        if str(c.get("Contact ID", "")).strip() in sent_contact_ids
+    ]
+    addresses = [a for a in addresses if a and a.upper() != schema.UNKNOWN]
+
+    if not addresses:
+        print("\n  Emails were sent, but none of them have a contact email "
+              "address recorded,\n  so there is nothing to search for.\n")
+        return 0
+
+    try:
+        service = authenticate()
+    except GmailError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  Checking {len(addresses)} address(es) for replies "
+          f"(last {args.days} days)...\n")
+
+    try:
+        replies = fetch_replies(service, addresses, days=args.days)
+    except ReplyError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not replies:
+        print("  No replies found.\n")
+        return 0
+
+    matched = match_to_outreach(replies, outreach, contacts)
+    print(f"  Found {len(replies)} message(s), {len(matched)} matched to outreach.\n")
+
+    if not matched:
+        print("  None matched a sent email. Check your inbox by hand.\n")
+        return 0
+
+    # Classification needs the AI, but detection above did not -- so you
+    # already know replies exist even if this part fails.
+    if args.mock:
+        print("  MOCK MODE -- classifications are fake.\n")
+    elif not config.has_ai_key:
+        logger.error("No AI API key configured. Add AI_API_KEY to .env, or use --mock.")
+        return 1
+
+    try:
+        ai_caller = get_ai_caller(config, use_mock=args.mock)
+    except AIError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    updated = 0
+    for index, (reply, row) in enumerate(matched):
+        outreach_id = row.get("Outreach ID")
+        company = str(row.get("Company Name", "?"))
+
+        existing = str(row.get("Reply Status", "")).strip().upper()
+        if existing and existing != schema.REPLY_NONE and not args.force:
+            print(f"    {outreach_id}  {company[:26]:<28} already recorded "
+                  f"({existing}) -- skipping")
+            continue
+
+        if index > 0 and not args.mock and config.seconds_between_ai_calls:
+            time.sleep(config.seconds_between_ai_calls)
+
+        result = classify_reply(config, reply, row, ai_caller)
+
+        try:
+            update_row(
+                config.excel_path, schema.OUTREACH, row["_row"],
+                reply_updates(reply, result, str(row.get("Notes", ""))),
+            )
+        except ExcelError as exc:
+            logger.error("Could not save the reply for %s: %s", outreach_id, exc)
+            continue
+
+        updated += 1
+        print("=" * 68)
+        print(f"  {outreach_id}  {company}")
+        print(f"  From      : {reply.from_address}")
+        print(f"  Received  : {reply.received}")
+        print(f"  Verdict   : {result.classification}  "
+              f"(confidence {result.confidence:.0%})")
+        print(f"  Summary   : {result.summary}")
+        print(f"  DO NEXT   : {result.next_action}")
+        if result.referred_to and result.referred_to != schema.UNKNOWN:
+            print(f"  Referred  : {result.referred_to}")
+        if result.deadline_mentioned and result.deadline_mentioned != schema.UNKNOWN:
+            print(f"  Deadline  : {result.deadline_mentioned}")
+        print()
+
+    print("=" * 68)
+    print(f"\n  Recorded {updated} reply/replies.")
+    if updated:
+        print("  Follow-ups for these threads have stopped automatically.")
+    print("\n  Next: python main.py followups\n")
+    return 0
+
+
 def cmd_report(config: Config, args) -> int:
     """Show the score distribution and pipeline counts.
 
@@ -1548,15 +2166,19 @@ COMMANDS = {
     "load-samples": cmd_load_samples,
     "show-companies": cmd_show_companies,
     "check-excel": cmd_check_excel,
+    "discover": cmd_discover,
+    "import-companies": cmd_import_companies,
     "fix-urls": cmd_fix_urls,
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
     "report": cmd_report,
+    "check-replies": cmd_check_replies,
     "gmail-auth": cmd_gmail_auth,
     "gmail-test": cmd_gmail_test,
     "send": cmd_send,
     "followups": cmd_followups,
     "mark-followup": cmd_mark_followup,
+    "log-application": cmd_log_application,
     "export": cmd_export,
     "mark-sent": cmd_mark_sent,
     "review": cmd_review,
@@ -1593,6 +2215,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("load-samples", help="Add the 10 test companies.")
+
+    discover_parser = subparsers.add_parser(
+        "discover", help="Find new organisations through a real web search."
+    )
+    discover_parser.add_argument("query", nargs="*", help="What to search for.")
+    discover_parser.add_argument(
+        "--preset", default=None,
+        help="A ready-made search: data, software, startups, ngo, research, health.",
+    )
+    discover_parser.add_argument(
+        "--engine", choices=["duckduckgo", "brave"], default="duckduckgo",
+        help="duckduckgo (default: no key needed) or brave (needs SEARCH_API_KEY).",
+    )
+    discover_parser.add_argument(
+        "--count", type=int, default=20, help="Results per query (max 20)."
+    )
+    discover_parser.add_argument("--country", default="Kenya", help="Country column value.")
+    discover_parser.add_argument("--region", default="Nairobi", help="Region column value.")
+    discover_parser.add_argument("--output", default=None, help="Where to write the CSV.")
+    discover_parser.add_argument(
+        "--no-screen", action="store_true", help="Skip AI screening of results."
+    )
+
+    import_parser = subparsers.add_parser(
+        "import-companies", help="Add companies from a CSV file."
+    )
+    import_parser.add_argument(
+        "csv_path", nargs="?", default="data/companies_to_add.csv",
+        help="Path to the CSV (default: data/companies_to_add.csv).",
+    )
     subparsers.add_parser("show-companies", help="List companies in the workbook.")
     subparsers.add_parser("check-excel", help="Validate the workbook structure.")
 
@@ -1652,6 +2304,18 @@ def build_parser() -> argparse.ArgumentParser:
         "check-approvals", help="Show what would be sent, and why the rest would not."
     )
 
+    replies_parser = subparsers.add_parser(
+        "check-replies", help="Search Gmail for replies and classify them."
+    )
+    replies_parser.add_argument(
+        "--days", type=int, default=90, help="How far back to search (default 90)."
+    )
+    replies_parser.add_argument("--mock", action="store_true", help="Fake classification.")
+    replies_parser.add_argument(
+        "--force", action="store_true",
+        help="Re-classify replies that are already recorded.",
+    )
+
     auth_parser = subparsers.add_parser(
         "gmail-auth", help="Authorise Gmail access (opens your browser once)."
     )
@@ -1687,6 +2351,23 @@ def build_parser() -> argparse.ArgumentParser:
     mark_followup_parser.add_argument("outreach_id", help="e.g. O003")
     mark_followup_parser.add_argument(
         "number", type=int, choices=[1, 2, 3], help="Which follow-up (1, 2 or 3)."
+    )
+
+    log_parser = subparsers.add_parser(
+        "log-application",
+        help="Record an application you made outside this system.",
+    )
+    log_parser.add_argument("company", help="Company name, or part of it.")
+    log_parser.add_argument(
+        "--how", default="applied through their careers portal",
+        help="How you applied (default: through their careers portal).",
+    )
+    log_parser.add_argument("--date", default=None, help="YYYY-MM-DD (default: today).")
+    log_parser.add_argument("--subject", default=None, help="Subject, if you emailed.")
+    log_parser.add_argument("--campaign", default=None, help="Campaign label.")
+    log_parser.add_argument(
+        "--again", action="store_true",
+        help="Log a second application to a company you already contacted.",
     )
 
     export_parser = subparsers.add_parser(

@@ -171,3 +171,38 @@ class TestDuplicatePrevention(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWrongCountryHandling(unittest.TestCase):
+    """A multinational's other-country HR inbox is the wrong route.
+
+    Liquid Intelligent published botswanahr@, hr.uganda@ and hr.zim@ but
+    no Kenya address. Emailing Botswana HR about a Nairobi placement
+    wastes everybody's time, so those are demoted and flagged.
+    """
+
+    def test_other_country_addresses_are_detected(self):
+        from app.contacts import wrong_country
+
+        for email in ["botswanahr@x.tech", "hr.uganda@x.tech", "hr.zim@x.tech"]:
+            self.assertTrue(wrong_country(email), email)
+
+    def test_local_and_neutral_addresses_are_not_flagged(self):
+        from app.contacts import wrong_country
+
+        for email in ["hr@kemri.go.ke", "careers@x.co.ke", "hr.kenya@x.tech"]:
+            self.assertFalse(wrong_country(email), email)
+
+    def test_a_home_country_address_outranks_a_foreign_one(self):
+        ranked = rank_emails(["botswanahr@x.tech", "hr.kenya@x.tech"])
+        self.assertEqual(ranked[0], "hr.kenya@x.tech")
+
+    def test_a_general_inbox_outranks_foreign_hr(self):
+        """info@ at least reaches the right country."""
+        ranked = rank_emails(["botswanahr@x.tech", "info@x.tech"])
+        self.assertEqual(ranked[0], "info@x.tech")
+
+    def test_foreign_addresses_are_kept_not_discarded(self):
+        """Sometimes a regional office is the only route in."""
+        ranked = rank_emails(["botswanahr@x.tech", "info@x.tech"])
+        self.assertIn("botswanahr@x.tech", ranked)

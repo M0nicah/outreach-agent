@@ -44,6 +44,31 @@ JUNK_EMAIL_PREFIXES = (
 # File extensions that regex mistakes for email domains.
 JUNK_EMAIL_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js")
 
+# Country names that appear in address local parts at multinationals.
+# An address like botswanahr@ or hr.uganda@ is a real HR inbox, but for
+# the WRONG country -- emailing it about a Nairobi placement wastes
+# everyone's time. We demote these rather than dropping them, because
+# occasionally the regional office is the only route in.
+OTHER_COUNTRY_HINTS = (
+    "botswana", "uganda", "tanzania", "zambia", "zimbabwe", "zim",
+    "rwanda", "malawi", "nigeria", "ghana", "southafrica", "sa",
+    "mozambique", "drc", "congo", "burundi", "ethiopia", "egypt",
+    "uk", "usa", "india",
+)
+
+
+def wrong_country(email: str, home_country: str = "kenya") -> bool:
+    """True when the address names a country other than the home one."""
+    local = email.split("@")[0].lower()
+    if home_country.lower() in local:
+        return False
+    return any(
+        hint in local
+        for hint in OTHER_COUNTRY_HINTS
+        if hint not in home_country.lower()
+    )
+
+
 # Local parts that suggest a recruitment-related inbox. Used only to RANK
 # addresses we actually found -- never to construct one.
 RECRUITMENT_HINTS = (
@@ -164,12 +189,16 @@ def rank_emails(emails: list[str]) -> list[str]:
     one, and an unranked general address is still a real address.
     """
 
-    def score(email: str) -> tuple[int, str]:
+    def score(email: str) -> tuple[int, int, str]:
         local = email.split("@")[0].lower()
+        # First key: an address for another country goes last, however
+        # recruitment-ish it looks.
+        country_penalty = 1 if wrong_country(email) else 0
+
         for index, hint in enumerate(RECRUITMENT_HINTS):
             if hint in local:
-                return (index, email)
-        return (len(RECRUITMENT_HINTS), email)
+                return (country_penalty, index, email)
+        return (country_penalty, len(RECRUITMENT_HINTS), email)
 
     return sorted(emails, key=score)
 
@@ -227,12 +256,14 @@ def find_contacts(company: dict[str, Any], pack: EvidencePack) -> ContactSearch:
             seen.setdefault(email, page.url)
 
     for email in rank_emails(list(seen)):
-        search.contacts.append(
-            FoundContact(
-                email=email,
-                source_url=seen[email],
-                why=f"Email address published on {seen[email]}",
+        note = f"Email address published on {seen[email]}"
+        if wrong_country(email):
+            note = (
+                f"{note}. WARNING: this address names another country -- "
+                "check whether it is the right office before writing."
             )
+        search.contacts.append(
+            FoundContact(email=email, source_url=seen[email], why=note)
         )
 
     # A careers portal is a legitimate route in, and for a large company
