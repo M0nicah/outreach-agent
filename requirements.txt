@@ -1,0 +1,9 @@
+# Stage 1 dependencies only.
+# Each later stage adds what it needs -- we do not install ahead of time.
+
+python-dotenv==1.0.1    # loads .env into environment variables
+openpyxl==3.1.5         # Excel .xlsx read/write (Stage 2)
+pandas==2.2.3           # tabular analysis where useful (Stage 2+)
+openai==1.59.6          # LLM API client (Stage 3)
+pydantic==2.10.5        # validates AI JSON output before it touches Excel (Stage 3)
+requests==2.32.3        # plain HTTP for web research (Stage 3)

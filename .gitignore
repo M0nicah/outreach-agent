@@ -1,0 +1,20 @@
+# Secrets -- never commit
+.env
+credentials.json
+token.json
+*.pickle
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Excel lock/temp files created when the workbook is open
+~$*.xlsx
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
