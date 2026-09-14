@@ -107,6 +107,22 @@ For each item in your evidence list, prefix it with its source quality:
 - "INFERRED:" you reasoned this from the evidence block
 Never list an item you cannot trace to the evidence block.
 
+THE SAME RULE APPLIES TO YOUR "reason" FIELD.
+
+Every factual claim in "reason" must be something a reader could find by
+searching the evidence block. Before writing each claim, ask yourself:
+"which words in the evidence block support this?" If you cannot point to
+them, delete the claim.
+
+In particular, a navigation link tells you only that the link exists. A
+link labelled "Meet our People" is evidence of a page with that name. It
+is NOT evidence of what that page contains -- do not describe testimonials,
+team profiles, or staff numbers you have not actually seen.
+
+If you want to state something you reasoned rather than read, mark it in
+the sentence itself, for example "the careers navigation suggests..." --
+never assert it flatly as observed fact.
+
 # OUTPUT
 
 Return ONLY a JSON object. No markdown fences, no commentary.

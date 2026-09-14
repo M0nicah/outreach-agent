@@ -181,3 +181,38 @@ class TestRetryBehaviour(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPriorityDerivation(unittest.TestCase):
+    """Priority is arithmetic, so Python owns it -- not the AI."""
+
+    def test_bands_match_the_specification(self):
+        from app.qualification import priority_for_score
+
+        for score, expected in [
+            (100, "A"), (90, "A"), (89, "B"), (75, "B"),
+            (74, "C"), (60, "C"), (59, "D"), (40, "D"), (39, "REJECT"), (0, "REJECT"),
+        ]:
+            self.assertEqual(priority_for_score(score), expected, f"score {score}")
+
+    def test_ai_priority_is_overridden_by_the_real_band(self):
+        # AI claims "A" but the scores total 82, which is a B.
+        result = parse_result(valid_payload(priority="A"))
+        self.assertEqual(result.priority, "B")
+
+    def test_needs_review_never_gets_labelled_reject(self):
+        """A company we could not research is not a company we turned down."""
+        result = parse_result(
+            valid_payload(
+                classification="NEEDS_REVIEW",
+                priority="REJECT",
+                technology_relevance=10, internship_likelihood=5,
+                skills_match=8, maturity=4, contactability=3, geographic=5,
+                total_score=35,
+            )
+        )
+        self.assertEqual(result.priority, "NEEDS_REVIEW")
+
+    def test_reject_classification_always_gets_reject_priority(self):
+        result = parse_result(valid_payload(classification="REJECT", priority="A"))
+        self.assertEqual(result.priority, "REJECT")

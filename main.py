@@ -15,6 +15,7 @@ Later stages add: contacts, draft, send, replies, followups
 import argparse
 import logging
 import sys
+import time
 
 from app import __version__, schema
 from app.config import Config, ConfigError, load_config
@@ -139,6 +140,52 @@ def cmd_load_samples(config: Config, args) -> int:
     return 0
 
 
+def cmd_fix_urls(config: Config, args) -> int:
+    """Update Website values in the workbook from the sample-data list.
+
+    Needed when a company's URL is corrected after its row was already
+    created. Only the Website column is touched -- everything else you
+    have edited by hand is left alone.
+    """
+    from app.excel import update_rows
+    from app.sample_data import SAMPLE_COMPANIES
+
+    correct = {name.strip().lower(): website for name, website, *_ in SAMPLE_COMPANIES}
+
+    try:
+        companies = read_companies(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    updates: dict[int, dict] = {}
+    for company in companies:
+        key = str(company.get("Company Name", "")).strip().lower()
+        wanted = correct.get(key)
+        if wanted and str(company.get("Website", "")).strip() != wanted:
+            print(f"  {company['Company Name']}: {company.get('Website')} -> {wanted}")
+            updates[company["_row"]] = {
+                "Website": wanted,
+                # The old result was based on the wrong URL, so it must be
+                # re-researched rather than left looking authoritative.
+                "Research Status": schema.RESEARCH_PENDING,
+            }
+
+    if not updates:
+        print("\nAll websites already match the sample list.\n")
+        return 0
+
+    try:
+        update_rows(config.excel_path, schema.COMPANIES, updates)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\nUpdated {len(updates)} website(s) and reset them to PENDING.")
+    print("Next: python main.py qualify\n")
+    return 0
+
+
 def cmd_show_companies(config: Config, args) -> int:
     """Print the companies as a readable table."""
     try:
@@ -255,8 +302,13 @@ def cmd_qualify(config: Config, args) -> int:
     counts: dict[str, int] = {}
     failures: list[str] = []
 
-    for company in queue:
+    for index, company in enumerate(queue):
         name = str(company.get("Company Name", "?"))
+
+        # Pace the calls. Free API tiers cap requests per minute, and a
+        # short pause is far cheaper than hitting the limit and retrying.
+        if index > 0 and not args.mock and config.seconds_between_ai_calls:
+            time.sleep(config.seconds_between_ai_calls)
 
         # Step 1: gather real evidence (no AI involved).
         pack = research_company(name, str(company.get("Website", "")))
@@ -266,13 +318,17 @@ def cmd_qualify(config: Config, args) -> int:
             result = qualify_company(
                 config, company, pack, settings, ai_caller=ai_caller
             )
-        except QualificationError as exc:
+        except (QualificationError, AIError) as exc:
             # A failure must be visible in the workbook, never silent.
             logger.error("%s", exc)
             failures.append(name)
+            # Clear any stale scores from a previous run, so an ERROR row
+            # never shows an old score that no longer reflects a real result.
             updates[company["_row"]] = {
                 "Research Status": schema.RESEARCH_ERROR,
                 "Qualification Reason": f"Qualification failed: {exc}"[:500],
+                "Total Score": "",
+                "Priority": "",
             }
             continue
 
@@ -350,6 +406,7 @@ COMMANDS = {
     "load-samples": cmd_load_samples,
     "show-companies": cmd_show_companies,
     "check-excel": cmd_check_excel,
+    "fix-urls": cmd_fix_urls,
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
 }
@@ -400,6 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-qualify companies that already have a status.",
     )
 
+    subparsers.add_parser(
+        "fix-urls", help="Sync corrected websites from sample_data into the workbook."
+    )
     subparsers.add_parser("show-results", help="Show qualification results.")
 
     return parser

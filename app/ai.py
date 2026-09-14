@@ -36,6 +36,15 @@ class AIError(Exception):
     """Raised when an AI provider cannot be reached or is misconfigured."""
 
 
+class TransientAIError(AIError):
+    """A failure that is worth retrying: overload, rate limit, timeout.
+
+    Kept separate from AIError so the caller can back off and try again
+    instead of giving up. A bad API key is NOT transient -- retrying it
+    just wastes time.
+    """
+
+
 # --- Gemini ----------------------------------------------------------------
 
 def call_gemini(config: Config, prompt: str) -> str:
@@ -48,6 +57,10 @@ def call_gemini(config: Config, prompt: str) -> str:
     try:
         from google import genai
         from google.genai import types
+
+        # The SDK warns about "automatic function calling" on every call.
+        # We do not use function calling, so the warning is pure noise.
+        logging.getLogger("google_genai.models").setLevel(logging.ERROR)
     except ImportError as exc:
         raise AIError(
             "The google-genai package is not installed. Run:\n"
@@ -69,7 +82,8 @@ def call_gemini(config: Config, prompt: str) -> str:
             ),
         )
     except Exception as exc:
-        raise AIError(_friendly_error("Gemini", exc)) from exc
+        error_class = TransientAIError if is_transient(exc) else AIError
+        raise error_class(_friendly_error("Gemini", exc)) from exc
 
     text = (response.text or "").strip()
     if not text:
@@ -106,7 +120,8 @@ def call_openai(config: Config, prompt: str) -> str:
             ],
         )
     except Exception as exc:
-        raise AIError(_friendly_error("OpenAI", exc)) from exc
+        error_class = TransientAIError if is_transient(exc) else AIError
+        raise error_class(_friendly_error("OpenAI", exc)) from exc
 
     content = response.choices[0].message.content
     if not content:
@@ -115,6 +130,23 @@ def call_openai(config: Config, prompt: str) -> str:
 
 
 # --- Error messages --------------------------------------------------------
+
+# HTTP-ish signals that mean "try again shortly" rather than "you are wrong".
+TRANSIENT_SIGNALS = [
+    "503", "unavailable", "high demand", "overloaded",
+    "429", "rate limit", "resource_exhausted",
+    "500", "internal error", "timeout", "timed out", "connection",
+]
+
+
+def is_transient(exc: Exception) -> bool:
+    """True when the error is worth retrying."""
+    text = str(exc).lower()
+    # A quota that is genuinely exhausted for the day is not transient,
+    # but a per-minute rate limit is. We cannot always tell them apart,
+    # so we retry and let the backoff sort it out.
+    return any(signal in text for signal in TRANSIENT_SIGNALS)
+
 
 def _friendly_error(provider: str, exc: Exception) -> str:
     """Turn a provider exception into something actionable.
@@ -129,6 +161,12 @@ def _friendly_error(provider: str, exc: Exception) -> str:
         return (
             f"{provider} rejected the API key. Check AI_API_KEY in your .env "
             "file -- it may be mistyped, revoked, or from a different provider."
+        )
+    if "503" in lowered or "high demand" in lowered or "overloaded" in lowered:
+        return (
+            f"{provider} is temporarily overloaded (503). This is on their "
+            "side and usually clears within a minute. The run already "
+            "retried several times -- try again shortly."
         )
     if "quota" in lowered or "429" in lowered or "rate limit" in lowered:
         return (
@@ -154,6 +192,39 @@ PROVIDERS = {
 }
 
 
+def with_retries(caller, attempts: int = 4, base_delay: float = 2.0):
+    """Wrap a caller so transient failures are retried with backoff.
+
+    Delays double each time (2s, 4s, 8s). Providers routinely return 503
+    "high demand" on free tiers, and a single busy moment should not
+    abort a run of ten companies.
+
+    Permanent errors -- a bad key, an unknown model -- are raised at once,
+    because retrying them only wastes time.
+    """
+    import time
+
+    def retrying_caller(config: Config, prompt: str) -> str:
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return caller(config, prompt)
+            except TransientAIError as exc:
+                last = exc
+                if attempt == attempts - 1:
+                    break
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "AI temporarily unavailable (attempt %d/%d). "
+                    "Waiting %.0fs before retrying.",
+                    attempt + 1, attempts, delay,
+                )
+                time.sleep(delay)
+        raise last  # type: ignore[misc]
+
+    return retrying_caller
+
+
 def get_ai_caller(config: Config, use_mock: bool = False):
     """Return the caller function for the configured provider.
 
@@ -174,4 +245,4 @@ def get_ai_caller(config: Config, use_mock: bool = False):
         )
 
     logger.debug("Using AI provider: %s (%s)", provider, config.ai_model)
-    return caller
+    return with_retries(caller)

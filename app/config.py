@@ -53,8 +53,17 @@ def _get_int(name: str, default: int) -> int:
 
 
 # Default model per provider, used when AI_MODEL is not set.
+#
+# We deliberately use Google's "-latest" alias rather than pinning a
+# version number. Google retires specific versions (gemini-2.0-flash was
+# retired and returned a 404), and the alias keeps working when they do.
+#
+# The "lite" model is the default because it has a more generous free-tier
+# quota. Qualification is a structured classification task, not creative
+# writing, so the smaller model is well suited to it. For a harder job,
+# set AI_MODEL=gemini-flash-latest in .env.
 DEFAULT_MODELS = {
-    "gemini": "gemini-2.0-flash",
+    "gemini": "gemini-flash-lite-latest",
     "openai": "gpt-4o-mini",
 }
 
@@ -67,6 +76,7 @@ class Config:
     ai_provider: str
     ai_api_key: str | None
     ai_model: str
+    seconds_between_ai_calls: int
 
     # Paths
     excel_path: Path
@@ -148,12 +158,13 @@ def load_config() -> Config:
 
     model = os.getenv("AI_MODEL", "").strip()
     if not model:
-        model = DEFAULT_MODELS.get(provider, "gemini-2.0-flash")
+        model = DEFAULT_MODELS.get(provider, "gemini-flash-lite-latest")
 
     return Config(
         ai_provider=provider,
         ai_api_key=api_key,
         ai_model=model,
+        seconds_between_ai_calls=_get_int("SECONDS_BETWEEN_AI_CALLS", 4),
         excel_path=excel_path,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         daily_send_limit=_get_int("DAILY_SEND_LIMIT", 10),

@@ -48,6 +48,23 @@ class QualificationError(Exception):
     """Raised when the AI result cannot be obtained or trusted."""
 
 
+def priority_for_score(score: int) -> str:
+    """Map a total score to its priority band.
+
+    Kept in Python because it is simple arithmetic and must be consistent.
+    90-100 = A, 75-89 = B, 60-74 = C, 40-59 = D, below 40 = REJECT.
+    """
+    if score >= 90:
+        return "A"
+    if score >= 75:
+        return "B"
+    if score >= 60:
+        return "C"
+    if score >= 40:
+        return "D"
+    return "REJECT"
+
+
 # --- The validated shape of an AI answer -----------------------------------
 
 class Qualification(BaseModel):
@@ -95,9 +112,41 @@ class Qualification(BaseModel):
     @classmethod
     def _known_priority(cls, value: str) -> str:
         value = value.strip().upper()
-        if value not in schema.PRIORITIES:
-            raise ValueError(f"must be one of {schema.PRIORITIES}, got {value!r}")
+        allowed = schema.PRIORITIES + [schema.RESEARCH_NEEDS_REVIEW]
+        if value not in allowed:
+            raise ValueError(f"must be one of {allowed}, got {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _priority_matches_classification(self) -> "Qualification":
+        """Derive priority in Python rather than trusting the AI's band.
+
+        Two problems this fixes:
+
+        1. Band arithmetic is deterministic, so there is no reason to let
+           a language model do it.
+        2. The AI was labelling NEEDS_REVIEW companies as priority
+           "REJECT" simply because a no-evidence company scores low. That
+           is wrong and dangerous: it makes a company we could not
+           research look like one we assessed and turned down.
+
+        NEEDS_REVIEW therefore always gets the literal priority
+        "NEEDS_REVIEW" -- it is a queue for you to look at, not a ranking.
+        """
+        if self.classification == schema.RESEARCH_REJECT:
+            correct = "REJECT"
+        elif self.classification == schema.RESEARCH_NEEDS_REVIEW:
+            correct = schema.RESEARCH_NEEDS_REVIEW
+        else:
+            correct = priority_for_score(self.total_score)
+
+        if correct != self.priority:
+            logger.debug(
+                "Priority corrected from %r to %r for a %s result.",
+                self.priority, correct, self.classification,
+            )
+            object.__setattr__(self, "priority", correct)
+        return self
 
     @model_validator(mode="after")
     def _totals_add_up(self) -> "Qualification":
@@ -275,6 +324,12 @@ def qualify_company(
         try:
             raw = ai_caller(config, prompt)
             return parse_result(raw)
+        except AIError as exc:
+            # A provider failure (bad key, overload, network) is not a
+            # malformed-output problem, so it is not retried here --
+            # app.ai already retried the transient ones. Convert it so
+            # the caller has one exception type to handle.
+            raise QualificationError(str(exc)) from exc
         except QualificationError as exc:
             last_error = exc
             if attempt < retries:
