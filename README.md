@@ -48,6 +48,8 @@ app/
   qualification.py   AI call + pydantic validation gate
   mock_ai.py         fake AI for free offline testing
   contacts.py        finds REAL contact routes; AI only labels them
+  campaigns.py       picks which of the 4 campaigns fits a company
+  email_drafts.py    generates drafts + quality checks; sends nothing
 prompts/             AI prompt templates (Stage 3+)
 data/                the Excel workbook -- the database (Stage 2)
 tests/               unit tests
@@ -63,8 +65,8 @@ main.py              CLI entry point
 | 3  | AI company qualification       | done |
 | 4  | 100-point scoring              | done |
 | 5  | Contact research               | done |
-| 6  | Email drafting                 | next |
-| 7  | Approval workflow              | |
+| 6  | Email drafting                 | done |
+| 7  | Approval workflow              | next |
 | 8  | Gmail sending                  | |
 | 9  | Reply tracking                 | |
 | 10 | Follow-ups                     | |
@@ -98,7 +100,35 @@ python main.py report           # score distribution and pipeline counts
 python main.py find-contacts    # find real contacts for QUALIFY companies
 python main.py find-contacts --include-review   # also NEEDS_REVIEW ones
 python main.py show-contacts    # list contacts found
+
+python main.py draft            # write drafts (PENDING; sends nothing)
+python main.py show-drafts        # list drafts
+python main.py show-drafts --full # read the full text of each draft
 ```
+
+## How drafts stay honest
+
+The AI writes the email, then **Python checks it**. Two failure modes are
+verified in code rather than trusted to the prompt, because both would
+embarrass you in front of a real employer:
+
+- **Flattery** -- "I have always admired your innovative company",
+  "world-class", "passionate about". Caught by a banned-phrase list.
+- **Overclaiming** -- "experienced data scientist", "years of
+  experience", "proven track record". You are a student; the email must
+  say so.
+
+A third check came from a real failure: a draft described you as a
+"second-year student", which appears nowhere in Settings. Settings
+records an expected *graduation* year, not a current year, so any
+year-of-study claim is invention and is now flagged.
+
+A flagged draft is still saved as PENDING, with the problem written into
+the Notes column. Flagging never auto-rejects -- you decide.
+
+The signature is built from the Settings sheet, not written by the AI,
+so your name, email and links are never paraphrased. Unfilled fields are
+omitted rather than shown as FILL_IN.
 
 ## How contact research stays honest
 

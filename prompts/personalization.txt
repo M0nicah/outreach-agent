@@ -1,0 +1,115 @@
+Write a short outreach email from a university student asking about an
+internship or industrial attachment.
+
+# THE STUDENT
+
+{student_profile}
+
+This person is a STUDENT with no professional work experience. Write as
+someone early in their learning, who is capable and willing to work, and
+honest about their level.
+
+# THE ORGANISATION
+
+Name: {company_name}
+What they do: {what_they_do}
+Their technology function: {technology_function}
+Evidence about internships: {internship_evidence}
+
+This campaign should emphasise: {campaign_focus}
+
+# WHAT YOU MUST NOT WRITE
+
+Do not invent anything. Every factual statement about this organisation
+must come from the three fields above. If a field says UNKNOWN, you know
+nothing about it -- write around it, do not fill the gap.
+
+Specifically, never write:
+
+- Flattery or compliments. No "I have long admired your company", no
+  "your innovative work", no "industry-leading", no "I am impressed by".
+  If you cannot say something factual, say nothing.
+- Invented specifics: projects, products, achievements, funding, awards,
+  clients, technologies, team sizes, or office locations.
+- A claim that they have an internship programme, unless the evidence
+  field above says so.
+- A named person. You do not know who will read this.
+- Claims about the student beyond the profile above. No invented
+  projects, no invented grades, no fabricated experience.
+- The student's year of study. The profile gives a graduation year, NOT
+  a current year. Never write "second-year", "third-year", "final-year"
+  or similar -- you do not know, and guessing misrepresents them to an
+  employer. Say what the profile says: the degree, the university, and
+  the expected graduation year.
+
+# HOW TO DESCRIBE THE STUDENT'S LEVEL
+
+Be accurate, not modest and not inflated.
+
+Correct: "I am studying data science and have been working with Python
+and SQL through my coursework and personal projects."
+
+Wrong, too senior: "I am an experienced data scientist with a strong
+track record of delivering machine learning solutions."
+
+Wrong, too weak: "I do not have much to offer but would be grateful for
+any chance."
+
+The student is a capable learner, not an expert. Say what they have
+actually worked with. Never describe them as experienced, seasoned,
+proven, or accomplished.
+
+# THE EMAIL
+
+Structure, in about 120-160 words total:
+
+1. One sentence: who they are and what they study.
+2. One or two sentences: why this organisation specifically -- grounded
+   ONLY in the factual fields above. If you genuinely have nothing
+   specific, say plainly that you are interested in the kind of work
+   they do, and name that work.
+3. One or two sentences: what the student can contribute and what they
+   want to learn. Be concrete about skills.
+4. A clear, modest ask: whether they would consider an intern or
+   industrial attachment placement, and who to speak to if not them.
+5. A short sign-off.
+
+IMPORTANT about the sign-off: end with a closing line only, such as
+"Thank you for your time." or "Kind regards,". Do NOT write the
+student's name after it. A signature block with their name and contact
+details is added automatically afterwards, and writing the name here
+makes it appear twice.
+
+Rules of style:
+
+- Plain, direct, human. Short sentences.
+- No marketing language. No exclamation marks.
+- Do not use the words: passionate, thrilled, delighted, excited,
+  leverage, synergy, dynamic, cutting-edge, world-class, esteemed,
+  renowned, prestigious.
+- Do not open with "I hope this email finds you well."
+- Do not include the student's contact details in the body -- those go
+  in a signature which is added separately.
+- Address it "Dear Hiring Team," or "Dear {company_name} Team,". Never
+  invent a person's name.
+
+Subject line: specific and plain, naming the ask AND the kind of work
+this campaign is about, so it does not read as a mass mailing. Examples:
+
+- "Internship enquiry - data analysis, BSc Data Science student"
+- "Industrial attachment enquiry - software development"
+- "Attachment enquiry - data and reporting support"
+
+Match the subject to the campaign focus given above. No clickbait, no
+company flattery, no exclamation marks.
+
+# OUTPUT
+
+Return ONLY a JSON object. No markdown fences, no commentary.
+
+{{
+  "subject": "the subject line",
+  "body": "the email body, with \\n between paragraphs, ending at the sign-off (no contact details)",
+  "grounded_claims": ["each factual statement you made about the organisation, and which field it came from"],
+  "confidence": 0.0 to 1.0
+}}

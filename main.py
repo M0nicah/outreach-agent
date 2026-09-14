@@ -512,6 +512,200 @@ def cmd_show_contacts(config: Config, args) -> int:
     return 0
 
 
+def cmd_draft(config: Config, args) -> int:
+    """Generate email drafts for contacts at qualified companies.
+
+    Every draft is written with Approval Status = PENDING. Nothing is
+    sent, and there is no code path in this command that can send.
+    """
+    from app.email_drafts import (
+        DraftError,
+        build_signature,
+        existing_outreach_keys,
+        generate_draft,
+        strip_trailing_name,
+        to_outreach_row,
+    )
+    from app.excel import next_id, read_settings, today
+
+    if args.mock:
+        print("\nMOCK MODE -- drafts are fake placeholder text.\n")
+    elif not config.has_ai_key:
+        logger.error("No AI API key configured. Add AI_API_KEY to .env, or use --mock.")
+        return 1
+
+    try:
+        ai_caller = get_ai_caller(config, use_mock=args.mock)
+    except AIError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        companies = {c["Company ID"]: c for c in read_companies(config.excel_path)}
+        contacts = read_contacts(config.excel_path)
+        outreach = read_outreach(config.excel_path)
+        settings = read_settings(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not contacts:
+        print("\nNo contacts yet. Run: python main.py find-contacts\n")
+        return 0
+
+    # Warn about profile fields the email would otherwise quote.
+    missing = [k for k, v in settings.items() if str(v).strip() == "FILL_IN"]
+    if missing:
+        logger.warning(
+            "These Settings are still FILL_IN and will be left out of the "
+            "signature: %s", ", ".join(missing),
+        )
+
+    seen = existing_outreach_keys(outreach)
+    next_number = int(next_id(outreach, "Outreach ID", "O")[1:])
+    signature = build_signature(settings)
+
+    # One draft per company, aimed at its best contact. The contacts are
+    # already ranked, so the first one for a company is the best route.
+    best_contact: dict[str, dict] = {}
+    for contact in contacts:
+        company_id = str(contact.get("Company ID", "")).strip()
+        if company_id not in best_contact:
+            best_contact[company_id] = contact
+
+    queue = []
+    for company_id, contact in best_contact.items():
+        company = companies.get(company_id)
+        if not company:
+            logger.warning("Contact %s refers to unknown company %s -- skipping.",
+                           contact.get("Contact ID"), company_id)
+            continue
+        status = str(company.get("Research Status", "")).strip().upper()
+        if status != schema.RESEARCH_QUALIFY and not args.include_review:
+            continue
+        queue.append((company, contact))
+
+    if args.limit:
+        queue = queue[: args.limit]
+
+    if not queue:
+        print(
+            "\nNothing to draft. Contacts exist only for companies that are not "
+            "QUALIFY.\nUse --include-review to draft for NEEDS_REVIEW companies too.\n"
+        )
+        return 0
+
+    print(f"Drafting {len(queue)} email(s)...\n")
+
+    new_rows: list[dict] = []
+    flagged = 0
+    for index, (company, contact) in enumerate(queue):
+        name = str(company.get("Company Name", "?"))
+
+        if index > 0 and not args.mock and config.seconds_between_ai_calls:
+            time.sleep(config.seconds_between_ai_calls)
+
+        try:
+            draft, campaign, problems = generate_draft(
+                config, company, settings, ai_caller
+            )
+        except DraftError as exc:
+            logger.error("%s", exc)
+            continue
+
+        key = (
+            str(company.get("Company ID", "")),
+            str(contact.get("Contact ID", "")),
+            campaign,
+        )
+        if key in seen:
+            logger.info("%s: already drafted for this campaign -- skipping.", name)
+            continue
+        seen.add(key)
+
+        # Append the signature here rather than asking the AI to write
+        # it: the details are facts from Settings and must not be
+        # paraphrased or invented.
+        # The model sometimes signs off with the student's name despite
+        # being told not to; strip it so the signature does not repeat it.
+        body = strip_trailing_name(draft.body, str(settings.get("Name", "")))
+        draft.body = f"{body.rstrip()}\n\n{signature}"
+
+        row = to_outreach_row(
+            f"O{next_number:03d}", company, contact, draft, campaign,
+            problems, today(),
+        )
+        next_number += 1
+        new_rows.append(row)
+
+        marker = "  FLAGGED" if problems else ""
+        if problems:
+            flagged += 1
+        print(f"  {name[:34]:<36} {campaign[:34]:<36}{marker}")
+        for problem in problems:
+            print(f"      ! {problem}")
+
+    if not new_rows:
+        print("\nNo new drafts created.\n")
+        return 0
+
+    try:
+        append_rows(config.excel_path, schema.OUTREACH, new_rows)
+    except ExcelError as exc:
+        logger.error("Drafts could NOT be saved: %s", exc)
+        return 1
+
+    print(f"\nCreated {len(new_rows)} draft(s), all PENDING. Nothing has been sent.")
+    if flagged:
+        print(f"{flagged} draft(s) were flagged for quality -- see the Notes column.")
+    print("\nNext: python main.py show-drafts")
+    print("Then review them in Excel and set Approval Status to APPROVED.\n")
+    return 0
+
+
+def cmd_show_drafts(config: Config, args) -> int:
+    """Print the drafts so you can read them without opening Excel."""
+    try:
+        outreach = read_outreach(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    if not outreach:
+        print("\nNo drafts yet. Run: python main.py draft\n")
+        return 0
+
+    if args.full:
+        for row in outreach:
+            print("\n" + "=" * 72)
+            print(f"{row.get('Outreach ID')}  {row.get('Company Name')}")
+            print(f"Campaign : {row.get('Campaign')}")
+            print(f"Status   : {row.get('Approval Status')} / {row.get('Email Status')}")
+            if row.get("Notes"):
+                print(f"NOTES    : {row.get('Notes')}")
+            print("-" * 72)
+            print(f"Subject: {row.get('Subject')}\n")
+            print(row.get("Email Body"))
+        print("\n" + "=" * 72)
+        print(f"{len(outreach)} draft(s)\n")
+        return 0
+
+    print()
+    print(f"{'ID':<6} {'Company':<26} {'Approval':<10} {'Email':<10} Subject")
+    print("-" * 100)
+    for row in outreach:
+        print(
+            f"{str(row.get('Outreach ID','')):<6} "
+            f"{str(row.get('Company Name',''))[:25]:<26} "
+            f"{str(row.get('Approval Status','')):<10} "
+            f"{str(row.get('Email Status','')):<10} "
+            f"{str(row.get('Subject',''))[:44]}"
+        )
+    print("-" * 100)
+    print(f"{len(outreach)} draft(s). Use --full to read them.\n")
+    return 0
+
+
 def cmd_report(config: Config, args) -> int:
     """Show the score distribution and pipeline counts.
 
@@ -642,6 +836,8 @@ COMMANDS = {
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
     "report": cmd_report,
+    "draft": cmd_draft,
+    "show-drafts": cmd_show_drafts,
     "find-contacts": cmd_find_contacts,
     "show-contacts": cmd_show_contacts,
 }
@@ -713,6 +909,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("show-contacts", help="List contacts found so far.")
+
+    draft_parser = subparsers.add_parser(
+        "draft", help="Generate email drafts (PENDING approval; sends nothing)."
+    )
+    draft_parser.add_argument("--mock", action="store_true", help="Fake drafts, no AI.")
+    draft_parser.add_argument("--limit", type=int, default=None, help="Only the first N.")
+    draft_parser.add_argument(
+        "--include-review", action="store_true",
+        help="Also draft for NEEDS_REVIEW companies.",
+    )
+
+    drafts_parser = subparsers.add_parser("show-drafts", help="List or read drafts.")
+    drafts_parser.add_argument(
+        "--full", action="store_true", help="Print the full text of every draft."
+    )
 
     return parser
 
