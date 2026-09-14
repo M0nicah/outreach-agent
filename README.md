@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 # 3. Create your local config
 cp .env.example .env
-# then open .env and fill in your OPENAI_API_KEY
+# then open .env and paste your key into AI_API_KEY
 
 # 4. Check it works
 python main.py
@@ -43,6 +43,10 @@ app/
   schema.py          sheet names, columns and allowed values
   excel.py           the only module that touches the workbook
   sample_data.py     10 mixed test companies
+  research.py        fetches real website text -- evidence, no AI
+  ai.py              provider layer (gemini / openai / mock)
+  qualification.py   AI call + pydantic validation gate
+  mock_ai.py         fake AI for free offline testing
 prompts/             AI prompt templates (Stage 3+)
 data/                the Excel workbook -- the database (Stage 2)
 tests/               unit tests
@@ -55,8 +59,8 @@ main.py              CLI entry point
 |-------|--------------|--------|
 | 1  | Project setup, config, logging | done |
 | 2  | Excel database (4 sheets)      | done |
-| 3  | AI company qualification       | next |
-| 4  | 100-point scoring              | |
+| 3  | AI company qualification       | done |
+| 4  | 100-point scoring              | next |
 | 5  | Contact research               | |
 | 6  | Email drafting                 | |
 | 7  | Approval workflow              | |
@@ -82,7 +86,51 @@ python main.py init-excel       # create the workbook (refuses to overwrite)
 python main.py load-samples     # add 10 test companies (skips duplicates)
 python main.py show-companies   # list them as a table
 python main.py check-excel      # validate structure, list unfilled settings
+
+python main.py qualify --mock   # research + qualify, free and offline
+python main.py qualify          # the real thing (needs AI_API_KEY)
+python main.py qualify --limit 3   # only the first 3, to keep a first run cheap
+python main.py qualify --force  # re-do companies that already have a status
+python main.py show-results     # results table, best score first
 ```
+
+## AI provider
+
+The default is **Google Gemini**, whose free tier needs no credit card.
+Get a key at <https://aistudio.google.com/apikey> and put it in `.env`:
+
+```
+AI_PROVIDER=gemini
+AI_API_KEY=your-key-here
+```
+
+To switch to OpenAI later, change two lines -- no code edits:
+
+```
+AI_PROVIDER=openai
+AI_API_KEY=your-openai-key
+```
+
+All AI calls go through `app/ai.py`, so the rest of the code does not
+know or care which provider answered.
+
+## How qualification stays honest
+
+The AI never researches from memory. The sequence is:
+
+1. `research.py` fetches the company's real homepage and careers page and
+   extracts the text. No AI involved.
+2. That retrieved text -- and nothing else -- is given to the AI as
+   evidence, along with any notes about what could NOT be fetched.
+3. The AI returns JSON, which `pydantic` validates before it is written.
+   A score above its maximum, an invented classification, or wrong
+   arithmetic is caught here, not in your spreadsheet.
+4. If the AI fails twice, the company is marked `ERROR` with the reason,
+   and picked up again on the next run. Nothing fails silently.
+
+Some real sites block automated access or render via JavaScript. Those
+are recorded as "no evidence retrieved", which leads to `NEEDS_REVIEW` --
+never `REJECT`. A company we could not look at is not a bad company.
 
 ## The workbook
 

@@ -40,9 +40,12 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_missing_key_raises_helpful_error(self):
         config = load_config()
-        if not config.has_openai_key:
+        if not config.has_ai_key:
             with self.assertRaises(ConfigError):
-                config.require_openai_key()
+                config.require_ai_key()
+
+    def test_provider_defaults_to_gemini(self):
+        self.assertIn(load_config().ai_provider, {"gemini", "openai"})
 
 
 if __name__ == "__main__":

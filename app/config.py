@@ -52,13 +52,21 @@ def _get_int(name: str, default: int) -> int:
         ) from exc
 
 
+# Default model per provider, used when AI_MODEL is not set.
+DEFAULT_MODELS = {
+    "gemini": "gemini-2.0-flash",
+    "openai": "gpt-4o-mini",
+}
+
+
 @dataclass(frozen=True)
 class Config:
     """All application settings. Frozen so nothing can mutate it at runtime."""
 
-    # AI
-    openai_api_key: str | None
-    openai_model: str
+    # AI -- provider-agnostic, so switching is a one-line .env change.
+    ai_provider: str
+    ai_api_key: str | None
+    ai_model: str
 
     # Paths
     excel_path: Path
@@ -79,22 +87,26 @@ class Config:
     gmail_redirect_uri: str
 
     @property
-    def has_openai_key(self) -> bool:
-        """True when an OpenAI key is configured. Checked before Stage 3 work."""
-        return bool(self.openai_api_key)
+    def has_ai_key(self) -> bool:
+        """True when an AI key is configured. Checked before any AI work."""
+        return bool(self.ai_api_key)
 
-    def require_openai_key(self) -> str:
-        """Return the OpenAI key, or raise a helpful error if it is missing.
+    def require_ai_key(self) -> str:
+        """Return the AI key, or raise a helpful error if it is missing.
 
-        Call this at the top of any function that is about to hit the AI API,
-        so the failure happens before we waste time on other work.
+        Called at the top of any function about to hit the API, so the
+        failure happens before we waste time on other work.
         """
-        if not self.openai_api_key:
+        if not self.ai_api_key:
+            where = {
+                "gemini": "https://aistudio.google.com/apikey  (free tier, no card needed)",
+                "openai": "https://platform.openai.com/api-keys  (paid)",
+            }.get(self.ai_provider, "your provider's dashboard")
             raise ConfigError(
-                "OPENAI_API_KEY is not set. Add it to your .env file "
-                "(copy .env.example to .env if you have not yet)."
+                f"No API key set for provider '{self.ai_provider}'. "
+                f"Add AI_API_KEY to your .env file.\nGet one at: {where}"
             )
-        return self.openai_api_key
+        return self.ai_api_key
 
 
 def load_config() -> Config:
@@ -121,9 +133,27 @@ def load_config() -> Config:
     if not excel_path.is_absolute():
         excel_path = PROJECT_ROOT / excel_path
 
+    # Provider selection, with backward compatibility: if someone still has
+    # OPENAI_API_KEY set from an earlier version, honour it.
+    provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+
+    api_key = os.getenv("AI_API_KEY") or None
+    if not api_key:
+        # Fall back to a provider-specific variable name.
+        api_key = (
+            os.getenv("GEMINI_API_KEY")
+            if provider == "gemini"
+            else os.getenv("OPENAI_API_KEY")
+        ) or None
+
+    model = os.getenv("AI_MODEL", "").strip()
+    if not model:
+        model = DEFAULT_MODELS.get(provider, "gemini-2.0-flash")
+
     return Config(
-        openai_api_key=os.getenv("OPENAI_API_KEY") or None,
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
+        ai_provider=provider,
+        ai_api_key=api_key,
+        ai_model=model,
         excel_path=excel_path,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         daily_send_limit=_get_int("DAILY_SEND_LIMIT", 10),

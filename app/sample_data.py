@@ -17,8 +17,10 @@ Everything else is left blank ON PURPOSE -- those columns are the AI's job
 in Stages 3-5. Pre-filling them would mean testing our own guesses rather
 than the system.
 
-The websites here are the companies' well-known public domains. Stage 3
-will verify them rather than trusting this file.
+The websites here were checked to resolve at the time of writing. Some
+real sites sit behind bot protection and will return "blocked" -- that is
+a genuine outcome the pipeline must handle, not a bug, and it is why two
+of these entries are expected to end up NEEDS_REVIEW rather than QUALIFY.
 """
 
 from app import schema
@@ -41,10 +43,13 @@ SAMPLE_COMPANIES = [
     ),
     (
         "Twiga Foods",
-        "https://twiga.com",
+        schema.UNKNOWN,  # current domain not confirmed -- do not guess one
         "Kenya",
         "Nairobi",
-        "Agri-logistics company built on a technology platform",
+        "Agri-logistics built on a tech platform, but we have no verified "
+        "website. A legitimate company with NO evidence -- should land in "
+        "NEEDS_REVIEW, never REJECT. This is the case that proves the "
+        "system distinguishes 'bad company' from 'no data'.",
     ),
     (
         "Cellulant",
@@ -62,18 +67,17 @@ SAMPLE_COMPANIES = [
     ),
     (
         "Strathmore University iLabAfrica",
-        "https://ilabafrica.ac.ke",
+        "https://ilabafrica.strathmore.edu",
         "Kenya",
         "Nairobi",
         "University research centre -- research/data projects",
     ),
     (
-        "Gearbox Europlacer",
-        "https://gearbox.co.ke",
+        "Andela",
+        "https://andela.com",
         "Kenya",
         "Nairobi",
-        "Smaller hardware/engineering outfit -- genuinely uncertain, "
-        "a good NEEDS_REVIEW candidate",
+        "Engineering talent company with a large Nairobi presence",
     ),
     (
         "Jamii Cyber Cafe",
