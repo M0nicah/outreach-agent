@@ -542,7 +542,7 @@ def cmd_import_companies(config: Config, args) -> int:
     """
     import csv
 
-    from app.excel import next_id, today
+    from app.excel import next_id, today, today
 
     path = Path(args.csv_path)
     if not path.is_absolute():
@@ -910,7 +910,7 @@ def cmd_find_contacts(config: Config, args) -> int:
         existing_contact_keys,
         find_contacts,
     )
-    from app.excel import next_id
+    from app.excel import next_id, today
 
     if args.mock:
         print("\nMOCK MODE -- contact classification is faked.\n")
@@ -951,6 +951,30 @@ def cmd_find_contacts(config: Config, args) -> int:
         )
         return 0
 
+    # Skip companies already searched. Re-fetching their websites on every
+    # run is slow and finds nothing new.
+    #
+    # Two things count as "already searched":
+    #   1. A contact row exists for them.
+    #   2. The search ran and found nothing, recorded as a NONE_FOUND row.
+    # Without the second, a company with no published contact details would
+    # be retried on every run forever.
+    searched_ids = {str(c.get("Company ID", "")).strip() for c in existing}
+
+    if not args.recheck:
+        before = len(queue)
+        queue = [c for c in queue
+                 if str(c.get("Company ID", "")).strip() not in searched_ids]
+        skipped_already = before - len(queue)
+        if skipped_already:
+            print(f"\n  Skipping {skipped_already} company/companies already "
+                  "searched. Use --recheck to search them again.")
+
+    if not queue:
+        print("\n  Every qualified company has already been searched.")
+        print("  Use --recheck to redo them, or qualify more companies first.\n")
+        return 0
+
     seen_keys = existing_contact_keys(existing)
     next_number = int(next_id(existing, "Contact ID", "P")[1:])
 
@@ -965,6 +989,9 @@ def cmd_find_contacts(config: Config, args) -> int:
     print(f"Searching for contacts at {len(queue)} company/companies...\n")
 
     new_rows: list[dict] = []
+    saved_total = 0
+    save_every = 5  # flush to the workbook every few companies
+
     for index, company in enumerate(queue):
         name = str(company.get("Company Name", "?"))
 
@@ -978,6 +1005,25 @@ def cmd_find_contacts(config: Config, args) -> int:
         if not search.found_anything:
             reason = search.notes[0] if search.notes else "nothing published"
             print(f"  {name[:38]:<40} none found -- {reason[:44]}")
+
+            # Record the attempt, so this company is not searched again on
+            # every future run. It is a real row with no email, which the
+            # rest of the pipeline already knows how to ignore.
+            new_rows.append({
+                "Contact ID": f"P{next_number:03d}",
+                "Company ID": company.get("Company ID", schema.UNKNOWN),
+                "Company Name": name,
+                "Contact Name": schema.UNKNOWN,
+                "Contact Role": schema.UNKNOWN,
+                "Contact Type": schema.UNKNOWN,
+                "Email": schema.UNKNOWN,
+                "Email Verified": "NO",
+                "LinkedIn": schema.UNKNOWN,
+                "Source": schema.UNKNOWN,
+                "Why This Contact": f"Searched on {today()}: {reason}"[:500],
+                "Contact Status": "NONE_FOUND",
+            })
+            next_number += 1
             continue
 
         # Step 2: the AI labels what was found. It cannot add anything.
@@ -1008,6 +1054,19 @@ def cmd_find_contacts(config: Config, args) -> int:
         for row in fresh:
             shown = row["Email"] if row["Email"] != schema.UNKNOWN else row["Source"]
             print(f"  {name[:38]:<40} {str(row['Contact Type'])[:28]:<30} {shown[:44]}")
+
+        # Save as we go. This command can run for many minutes across
+        # dozens of companies, and writing only at the end meant an
+        # interruption threw away everything found so far.
+        if fresh and len(new_rows) >= save_every:
+            try:
+                append_rows(config.excel_path, schema.CONTACTS, new_rows)
+                saved_total += len(new_rows)
+                logger.info("Saved %d contact(s) so far.", saved_total)
+                new_rows = []
+            except ExcelError as exc:
+                logger.error("Could not save progress: %s", exc)
+                return 1
 
     if not new_rows:
         print("\nNo new contacts found.\n")
@@ -1069,7 +1128,7 @@ def cmd_draft(config: Config, args) -> int:
         strip_trailing_name,
         to_outreach_row,
     )
-    from app.excel import next_id, read_settings, today
+    from app.excel import next_id, today, read_settings, today
 
     if args.mock:
         print("\nMOCK MODE -- drafts are fake placeholder text.\n")
@@ -1246,7 +1305,7 @@ def cmd_log_application(config: Config, args) -> int:
     source of truth -- and so follow-up tracking and duplicate prevention
     still work for that company.
     """
-    from app.excel import next_id, today, update_row
+    from app.excel import next_id, today, today, update_row
 
     try:
         companies = read_companies(config.excel_path)
@@ -2553,6 +2612,10 @@ def build_parser() -> argparse.ArgumentParser:
     contacts_parser.add_argument(
         "--per-company", type=int, default=3,
         help="Maximum contacts to record per company (default 3).",
+    )
+    contacts_parser.add_argument(
+        "--recheck", action="store_true",
+        help="Search companies again even if they have been searched before.",
     )
 
     subparsers.add_parser("show-contacts", help="List contacts found so far.")

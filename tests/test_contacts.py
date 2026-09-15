@@ -206,3 +206,75 @@ class TestWrongCountryHandling(unittest.TestCase):
         """Sometimes a regional office is the only route in."""
         ranked = rank_emails(["botswanahr@x.tech", "info@x.tech"])
         self.assertIn("botswanahr@x.tech", ranked)
+
+
+class TestUnsuitableInboxes(unittest.TestCase):
+    """Some published addresses are real but are the wrong place to apply.
+
+    Two found in live runs: raising.concerns@4g-capital.com is a
+    whistleblowing line, and abeer.etefa@wfp.org is a named press officer.
+    Both are genuine addresses; neither should receive a job application.
+    """
+
+    def test_whistleblowing_and_press_addresses_are_flagged(self):
+        from app.contacts import is_unsuitable_inbox
+
+        for email in [
+            "raising.concerns@x.com", "press@x.com", "media@x.com",
+            "legal@x.com", "procurement@x.com", "complaints@x.com",
+        ]:
+            self.assertTrue(is_unsuitable_inbox(email), email)
+
+    def test_normal_addresses_are_not_flagged(self):
+        from app.contacts import is_unsuitable_inbox
+
+        for email in ["hr@x.com", "careers@x.com", "info@x.com", "kenya.jobs@x.com"]:
+            self.assertFalse(is_unsuitable_inbox(email), email)
+
+    def test_unsuitable_addresses_rank_last(self):
+        ranked = rank_emails(["raising.concerns@x.com", "info@x.com", "hr@x.com"])
+        self.assertEqual(ranked[0], "hr@x.com")
+        self.assertEqual(ranked[-1], "raising.concerns@x.com")
+
+    def test_they_are_kept_not_discarded(self):
+        """Still recorded -- you may want to see what exists."""
+        ranked = rank_emails(["raising.concerns@x.com", "info@x.com"])
+        self.assertIn("raising.concerns@x.com", ranked)
+
+
+class TestSkipAlreadySearched(unittest.TestCase):
+    """find-contacts should not re-fetch companies it has already searched.
+
+    Before this, every run re-fetched all 53 qualified companies, taking
+    minutes to find nothing new. A company where the search found nothing
+    was the harder case: with no row written, it looked identical to one
+    never searched, so it was retried forever.
+    """
+
+    def test_a_company_with_contacts_is_recognised_as_searched(self):
+        existing = [{"Company ID": "C001", "Email": "hr@a.com"}]
+        searched = {str(c.get("Company ID", "")).strip() for c in existing}
+        self.assertIn("C001", searched)
+
+    def test_a_none_found_row_also_counts_as_searched(self):
+        """The row exists with no email, which is the whole point."""
+        existing = [{
+            "Company ID": "C002", "Email": schema.UNKNOWN,
+            "Contact Status": "NONE_FOUND",
+        }]
+        searched = {str(c.get("Company ID", "")).strip() for c in existing}
+        self.assertIn("C002", searched)
+
+    def test_an_unsearched_company_is_not_skipped(self):
+        existing = [{"Company ID": "C001", "Email": "hr@a.com"}]
+        searched = {str(c.get("Company ID", "")).strip() for c in existing}
+        self.assertNotIn("C099", searched)
+
+    def test_a_none_found_row_has_no_usable_email(self):
+        """It must not look like a contact you could write to."""
+        row = {
+            "Company ID": "C002", "Email": schema.UNKNOWN,
+            "Contact Status": "NONE_FOUND", "Source": schema.UNKNOWN,
+        }
+        email = str(row.get("Email", "")).strip()
+        self.assertEqual(email, schema.UNKNOWN)

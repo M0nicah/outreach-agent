@@ -76,8 +76,37 @@ RECRUITMENT_HINTS = (
     "intern", "graduate", "hiring", "people", "attachment",
 )
 
-# Pages worth checking for contact details, beyond what research.py fetched.
-CONTACT_PATHS = ["/contact", "/contact-us", "/about/contact", "/contacts"]
+# Local parts that are never a sensible target for a job application,
+# even though they are real published addresses.
+#
+# Two real examples from live runs: raising.concerns@ is a whistleblowing
+# line, and abeer.etefa@wfp.org is a named press officer. Writing to
+# either about an internship would be unwelcome and ineffective.
+UNSUITABLE_HINTS = (
+    "raising.concerns", "whistle", "compliance", "fraud", "abuse",
+    "press", "media", "privacy", "legal", "procurement", "tender",
+    "billing", "invoice", "complaints", "safeguarding",
+)
+
+
+def is_unsuitable_inbox(email: str) -> bool:
+    """True when the address exists but is the wrong place to apply."""
+    local = email.split("@")[0].lower()
+    return any(hint in local for hint in UNSUITABLE_HINTS)
+
+# Pages worth checking for contact details, beyond what research.py
+# fetched. Ordered by how likely they are to carry a real address.
+#
+# Widened after finding that two pages (homepage + careers) missed
+# addresses that were published elsewhere on the same site -- Amref's
+# info@ address, for example.
+CONTACT_PATHS = ["/contact", "/contact-us", "/contacts", "/about-us", "/about"]
+
+# How many contact pages to try per company. Each is an HTTP request
+# against a possibly-slow site, so this trades run time against coverage.
+# Three is the point where the extra pages stopped finding much in
+# testing, while five made a 77-company run unacceptably slow.
+MAX_CONTACT_PAGES = 3
 
 
 @dataclass
@@ -191,8 +220,11 @@ def rank_emails(emails: list[str]) -> list[str]:
 
     def score(email: str) -> tuple[int, int, str]:
         local = email.split("@")[0].lower()
-        # First key: an address for another country goes last, however
-        # recruitment-ish it looks.
+        # Unsuitable inboxes (whistleblowing, press, legal) go last of all.
+        if is_unsuitable_inbox(email):
+            return (2, len(RECRUITMENT_HINTS), email)
+
+        # Then an address for another country, however recruitment-ish.
         country_penalty = 1 if wrong_country(email) else 0
 
         for index, hint in enumerate(RECRUITMENT_HINTS):
@@ -234,13 +266,20 @@ def find_contacts(company: dict[str, Any], pack: EvidencePack) -> ContactSearch:
     # Then try contact pages, which is where addresses usually live.
     if pack.pages:
         base = f"{urlparse(pack.pages[0].url).scheme}://{urlparse(pack.pages[0].url).netloc}"
-        for path in CONTACT_PATHS[:2]:
+        checked = 0
+        for path in CONTACT_PATHS:
+            if checked >= MAX_CONTACT_PAGES:
+                break
             page, error = fetch_page(base + path)
+            checked += 1
             if page:
                 pages.append(page)
-                logger.info("%s: read contact page %s", name, page.url)
-                break
-            if error:
+                logger.info("%s: read %s", name, page.url)
+                # Stop once we have actually found an address, rather than
+                # after the first page that merely loads.
+                if extract_emails(page.text, company_domain):
+                    break
+            elif error:
                 logger.debug("%s: %s", name, error)
 
     if not pages:
