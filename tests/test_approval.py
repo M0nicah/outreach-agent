@@ -174,3 +174,39 @@ class TestNormalise(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestApprovalFilters(unittest.TestCase):
+    """check-approvals can be scoped to one batch.
+
+    Rows approved days ago and never sent stay in the list, which is
+    correct -- they are still outstanding -- but it gets hard to see
+    which are new. The output groups by draft date, and --since narrows it.
+    """
+
+    class Args:
+        only = None
+        since = None
+
+    ROWS = [
+        {"Outreach ID": "O002", "Date Drafted": "2026-09-14"},
+        {"Outreach ID": "O056", "Date Drafted": "2026-09-15"},
+    ]
+
+    def _filter(self, **kwargs):
+        import main
+
+        args = self.Args()
+        for k, v in kwargs.items():
+            setattr(args, k, v)
+        return main._filter_rows(self.ROWS, args)
+
+    def test_since_excludes_earlier_batches(self):
+        result = self._filter(since="2026-09-15")
+        self.assertEqual([r["Outreach ID"] for r in result], ["O056"])
+
+    def test_no_filter_shows_everything_outstanding(self):
+        self.assertEqual(len(self._filter()), 2)
+
+    def test_only_selects_specific_rows(self):
+        self.assertEqual(len(self._filter(only=["O002"])), 1)

@@ -1045,7 +1045,12 @@ def cmd_find_contacts(config: Config, args) -> int:
             seen_keys.add(key)
             fresh.append(row)
 
-        # Re-number after de-duplication so IDs stay contiguous.
+        # Assign the final IDs here, once, after de-duplication. These are
+        # the numbers actually written to the sheet, so nothing else may
+        # advance next_number in between -- an earlier version let the
+        # "nothing found" rows consume numbers here too, which pushed
+        # every later Contact ID out of step and mis-linked 21 outreach
+        # rows to other companies.
         for row in fresh:
             row["Contact ID"] = f"P{next_number:03d}"
             next_number += 1
@@ -1553,6 +1558,11 @@ def cmd_check_approvals(config: Config, args) -> int:
         print("\nNo drafts yet. Run: python main.py draft\n")
         return 0
 
+    outreach = _filter_rows(outreach, args)
+    if not outreach:
+        print("\n  Nothing matches that filter.\n")
+        return 0
+
     result = summarise(outreach)
 
     print(f"\n{'='*66}\n  APPROVAL STATUS\n{'='*66}\n")
@@ -1576,9 +1586,28 @@ def cmd_check_approvals(config: Config, args) -> int:
             print("      then press Cmd+S and CLOSE the file before running commands.")
 
     print(f"\n  WOULD BE SENT: {len(result['sendable'])}\n")
+
+    # Group by the date drafted. Rows approved days ago and never sent are
+    # easy to lose track of, so show plainly which batch each belongs to.
+    by_date: dict[str, list] = {}
     for row in result["sendable"]:
-        print(f"    {row.get('Outreach ID')}  {str(row.get('Company Name'))[:30]:<32} "
-              f"{str(row.get('Subject'))[:40]}")
+        by_date.setdefault(str(row.get("Date Drafted", ""))[:10] or "(no date)", []).append(row)
+
+    from datetime import date as _date
+
+    today_str = _date.today().isoformat()
+    for drafted in sorted(by_date):
+        label = "today" if drafted == today_str else drafted
+        print(f"    -- drafted {label} ({len(by_date[drafted])}) --")
+        for row in by_date[drafted]:
+            print(f"    {row.get('Outreach ID')}  {str(row.get('Company Name'))[:30]:<32} "
+                  f"{str(row.get('Subject'))[:36]}")
+        print()
+
+    if len(by_date) > 1:
+        print("    To act on one batch only:")
+        print(f"        python main.py export --since {today_str}")
+        print("        python main.py export --only O056 O057\n")
 
     if result["blocked"]:
         print(f"\n  WOULD NOT BE SENT: {len(result['blocked'])}\n")
@@ -1640,6 +1669,95 @@ def cmd_export(config: Config, args) -> int:
 
     print("\nAfter sending each one, record it:")
     print("    python main.py mark-sent O001\n")
+    return 0
+
+
+def cmd_apply(config: Config, args) -> int:
+    """Work through portal applications one at a time.
+
+    Most large organisations publish a careers portal rather than an email
+    address, so `send` can never mark those rows -- you apply on their
+    website yourself. Remembering to run `mark-sent` afterwards is easy to
+    forget, and forgotten rows clog the outstanding list.
+
+    This opens each portal, shows the drafted text to paste into their
+    form, and records the result as you go.
+    """
+    import webbrowser
+
+    from app.approval import is_sendable
+    from app.excel import today, update_row
+    from app.manual_send import SendRoute, resolve_route
+    from app.manual_send import mark_sent_updates
+
+    try:
+        outreach = read_outreach(config.excel_path)
+        contacts = read_contacts(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    contacts_by_id = {str(c.get("Contact ID", "")).strip(): c for c in contacts}
+
+    queue = []
+    for row in _filter_rows(outreach, args):
+        allowed, _ = is_sendable(row)
+        if not allowed:
+            continue
+        route, target = resolve_route(row, contacts_by_id)
+        if route == SendRoute.PORTAL:
+            queue.append((row, target))
+
+    if not queue:
+        print("\n  No portal applications outstanding.\n")
+        return 0
+
+    print(f"\n  {len(queue)} portal application(s) to work through.")
+    print("  For each: [o]pen in browser  [d]one  [s]kip  [q]uit\n")
+
+    done = skipped = 0
+    for index, (row, url) in enumerate(queue, start=1):
+        company = str(row.get("Company Name", "?"))
+        print("=" * 70)
+        print(f"  ({index}/{len(queue)})  {row.get('Outreach ID')}  {company}")
+        print(f"  Apply at: {url}")
+        print("=" * 70)
+        print(f"\nSubject: {row.get('Subject')}\n")
+        print(row.get("Email Body"))
+        print()
+
+        while True:
+            try:
+                answer = input("  [o]pen  [d]one  [s]kip  [q]uit > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Stopped.")
+                answer = "q"
+
+            if answer.startswith("o"):
+                webbrowser.open(url)
+                print("  Opened in your browser. Apply, then press d when done.")
+                continue
+            break
+
+        if answer.startswith("q"):
+            break
+        if answer.startswith("d"):
+            try:
+                update_row(
+                    config.excel_path, schema.OUTREACH, row["_row"],
+                    mark_sent_updates(today(), note=f"Applied via portal: {url}"[:400]),
+                )
+                print(f"  Recorded as applied on {today()}.\n")
+                done += 1
+            except ExcelError as exc:
+                logger.error("Could not save: %s", exc)
+                return 1
+        else:
+            skipped += 1
+            print("  Skipped -- still outstanding.\n")
+
+    print(f"\n  Applied to {done}, skipped {skipped}.")
+    print("  Follow-ups are tracked from today for the ones you recorded.\n")
     return 0
 
 
@@ -2215,6 +2333,117 @@ def cmd_send(config: Config, args) -> int:
     return 0
 
 
+def cmd_verify_sent(config: Config, args) -> int:
+    """Reconcile the workbook against your Gmail Sent folder.
+
+    Gmail is the source of truth for what actually went out. The workbook
+    can fall behind it -- for example if Excel overwrote a write, or a
+    send succeeded but the workbook could not be saved.
+
+    This finds both kinds of disagreement and offers to fix the one that
+    matters: an email that was sent but is not recorded.
+    """
+    import re
+
+    from app.excel import today, update_row
+    from app.gmail import GmailError, authenticate
+    from app.manual_send import mark_sent_updates
+
+    try:
+        outreach = read_outreach(config.excel_path)
+        contacts = read_contacts(config.excel_path)
+    except ExcelError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        service = authenticate()
+    except GmailError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    print(f"\n  Reading your Gmail Sent folder (last {args.days} days)...")
+
+    try:
+        listing = service.users().messages().list(
+            userId="me", q=f"in:sent newer_than:{args.days}d", maxResults=200
+        ).execute()
+    except Exception as exc:
+        logger.error("Could not read Gmail: %s", exc)
+        return 1
+
+    sent_to: dict[str, str] = {}
+    for stub in listing.get("messages", []):
+        try:
+            full = service.users().messages().get(
+                userId="me", id=stub["id"], format="metadata",
+                metadataHeaders=["To"],
+            ).execute()
+        except Exception:
+            continue
+        for header in full.get("payload", {}).get("headers", []):
+            if header.get("name") == "To":
+                match = re.search(r"[\w.+-]+@[\w.-]+", header.get("value", ""))
+                if match:
+                    sent_to[match.group(0).lower()] = stub["id"]
+
+    print(f"  Found {len(sent_to)} recipient(s) in Gmail.\n")
+
+    contacts_by_id = {str(c.get("Contact ID", "")).strip(): c for c in contacts}
+
+    missing = []   # sent in Gmail, not recorded in the workbook
+    unverified = []  # recorded as sent, no matching Gmail message
+    for row in outreach:
+        contact = contacts_by_id.get(str(row.get("Contact ID", "")).strip(), {})
+        email = str(contact.get("Email", "")).strip().lower()
+        if not email or email == schema.UNKNOWN.lower():
+            continue  # portal applications never appear in Gmail
+
+        recorded = str(row.get("Email Status", "")).strip().upper() == schema.EMAIL_SENT
+        in_gmail = email in sent_to
+
+        if in_gmail and not recorded:
+            missing.append((row, email, sent_to[email]))
+        elif recorded and not in_gmail:
+            unverified.append((row, email))
+
+    if not missing and not unverified:
+        print("  Everything reconciles. Every email in Gmail has a SENT row,")
+        print("  and every SENT row with an address appears in Gmail.\n")
+        return 0
+
+    if missing:
+        print(f"  SENT IN GMAIL BUT NOT RECORDED ({len(missing)}):\n")
+        for row, email, message_id in missing:
+            print(f"    {row.get('Outreach ID')}  "
+                  f"{str(row.get('Company Name'))[:28]:<30} {email}")
+
+    if unverified:
+        print(f"\n  RECORDED AS SENT BUT NOT IN GMAIL ({len(unverified)}):")
+        print("    (normal for anything you sent by hand or applied for "
+              "on a portal)\n")
+        for row, email in unverified:
+            print(f"    {row.get('Outreach ID')}  "
+                  f"{str(row.get('Company Name'))[:28]:<30} {email}")
+
+    if missing and args.fix:
+        updates = 0
+        for row, email, message_id in missing:
+            try:
+                update_row(
+                    config.excel_path, schema.OUTREACH, row["_row"],
+                    mark_sent_updates(today(), note=f"Gmail message id: {message_id}"),
+                )
+                updates += 1
+            except ExcelError as exc:
+                logger.error("Could not save %s: %s", row.get("Outreach ID"), exc)
+        print(f"\n  Recorded {updates} missing send(s).\n")
+    elif missing:
+        print("\n  Run with --fix to record these as sent.\n")
+
+    return 0
+
+
 def cmd_check_replies(config: Config, args) -> int:
     """Search Gmail for replies, classify them, and update the workbook.
 
@@ -2482,6 +2711,7 @@ COMMANDS = {
     "qualify": cmd_qualify,
     "show-results": cmd_show_results,
     "report": cmd_report,
+    "verify-sent": cmd_verify_sent,
     "check-replies": cmd_check_replies,
     "gmail-auth": cmd_gmail_auth,
     "gmail-test": cmd_gmail_test,
@@ -2490,6 +2720,7 @@ COMMANDS = {
     "mark-followup": cmd_mark_followup,
     "log-application": cmd_log_application,
     "export": cmd_export,
+    "apply": cmd_apply,
     "mark-sent": cmd_mark_sent,
     "review": cmd_review,
     "check-approvals": cmd_check_approvals,
@@ -2637,8 +2868,27 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "review", help="Review pending drafts one at a time and approve or reject."
     )
-    subparsers.add_parser(
+    approvals_parser = subparsers.add_parser(
         "check-approvals", help="Show what would be sent, and why the rest would not."
+    )
+    approvals_parser.add_argument(
+        "--only", nargs="+", default=None, metavar="ID",
+        help="Only these Outreach IDs.",
+    )
+    approvals_parser.add_argument(
+        "--since", default=None, metavar="DATE",
+        help="Only rows drafted on or after this date (YYYY-MM-DD, or 'today').",
+    )
+
+    verify_parser = subparsers.add_parser(
+        "verify-sent", help="Reconcile the workbook against your Gmail Sent folder."
+    )
+    verify_parser.add_argument(
+        "--days", type=int, default=30, help="How far back to check (default 30)."
+    )
+    verify_parser.add_argument(
+        "--fix", action="store_true",
+        help="Record any email found in Gmail but missing from the workbook.",
     )
 
     replies_parser = subparsers.add_parser(
@@ -2731,6 +2981,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only rows drafted on or after this date (YYYY-MM-DD, or 'today').",
     )
 
+    apply_parser = subparsers.add_parser(
+        "apply", help="Work through careers-portal applications one at a time."
+    )
+    apply_parser.add_argument(
+        "--only", nargs="+", default=None, metavar="ID", help="Only these rows."
+    )
+    apply_parser.add_argument(
+        "--since", default=None, metavar="DATE", help="Only rows drafted since this date."
+    )
+
     sent_parser = subparsers.add_parser(
         "mark-sent", help="Record that you sent an approved email by hand."
     )
@@ -2783,6 +3043,34 @@ def main(argv: list[str] | None = None) -> int:
     # So warn once, for every command that touches the workbook.
     if command not in {"status", "init-excel", "gmail-auth"}:
         _warn_if_open_in_excel(config)
+
+    # Commands that WRITE results you cannot recreate -- above all, the
+    # record of which emails actually went out -- must not run while
+    # Excel holds the workbook.
+    #
+    # The danger is specific: on macOS Excel does not lock the file, so
+    # the write succeeds, but Excel is still showing the old version. The
+    # next time you press Cmd+S, Excel writes its stale copy back and the
+    # SENT marks vanish -- while the emails remain irreversibly sent.
+    from app.excel import is_open_in_excel
+
+    WRITES_IRREPLACEABLE = {"send", "mark-sent", "mark-followup", "apply",
+                            "log-application", "check-replies"}
+    if command in WRITES_IRREPLACEABLE and is_open_in_excel(config.excel_path):
+        logger.error(
+            "Refusing to run `%s` while the workbook is open in Excel.\n\n"
+            "         This command records something that cannot be recreated "
+            "-- which\n"
+            "         emails actually went out. Excel is showing an older copy "
+            "of the\n"
+            "         file, so the next time you press Cmd+S it would overwrite "
+            "that\n"
+            "         record, while the emails stay sent.\n\n"
+            "         Close the workbook in Excel (Cmd+W), then run this again.\n"
+            "         Reopen it afterwards to see the changes.",
+            command,
+        )
+        return 1
 
     return handler(config, args)
 

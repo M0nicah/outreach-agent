@@ -175,6 +175,16 @@ def _prepare_for_viewing(workbook: Workbook) -> None:
         logger.debug("Could not set view preferences: %s", exc)
 
 
+def is_open_in_excel(path: Path) -> bool:
+    """True when Excel appears to have the workbook open.
+
+    Excel writes a lock file named ~$<name>.xlsx alongside the original
+    while a workbook is open. On macOS it does NOT actually lock the file
+    against other writers, so this is the only reliable signal.
+    """
+    return (path.parent / f"~${path.name}").exists()
+
+
 def _save(workbook: Workbook, path: Path) -> None:
     """Save the workbook, with a clear error if the file is locked.
 

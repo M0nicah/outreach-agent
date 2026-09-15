@@ -49,6 +49,20 @@ def resolve_route(
     if not contact:
         return SendRoute.NONE, "No contact record found for this outreach row."
 
+    # Guard against a mis-linked row. This is not hypothetical: an ID
+    # numbering bug once left 21 outreach rows pointing at another
+    # company's contact, which would have sent Oxfam's email to Amref.
+    # Refuse rather than deliver to the wrong organisation.
+    outreach_company = str(outreach_row.get("Company ID", "")).strip()
+    contact_company = str(contact.get("Company ID", "")).strip()
+    if outreach_company and contact_company and outreach_company != contact_company:
+        return SendRoute.NONE, (
+            f"MISMATCH: this row is for {outreach_row.get('Company Name')} but its "
+            f"contact belongs to {contact.get('Company Name')}. Not sending. "
+            "Re-run `python main.py find-contacts --recheck` and check the "
+            "Contact ID column."
+        )
+
     email = str(contact.get("Email", "")).strip()
     if email and email.upper() != schema.UNKNOWN:
         return SendRoute.EMAIL, email

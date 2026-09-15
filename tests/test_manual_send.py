@@ -178,3 +178,41 @@ class TestBatchFilters(unittest.TestCase):
 
     def test_an_unmatched_filter_returns_nothing(self):
         self.assertEqual(self._filter(only=["O999"]), [])
+
+
+class TestContactCompanyMismatch(unittest.TestCase):
+    """An outreach row must never use another company's contact.
+
+    A Contact ID numbering bug once left 21 rows pointing at the wrong
+    company: Glovo's row carried Pezesha's address, Oxfam's carried
+    Amref's. Sending those would have put the wrong company's name in
+    front of the wrong reader.
+    """
+
+    def test_a_mismatched_contact_is_refused(self):
+        outreach = outreach_row(**{"Company ID": "C048", "Company Name": "Glovo"})
+        contacts = {"P001": {
+            "Contact ID": "P001", "Company ID": "C044",
+            "Company Name": "Pezesha", "Email": "hello@pezesha.com",
+        }}
+        route, message = resolve_route(outreach, contacts)
+        self.assertEqual(route, SendRoute.NONE)
+        self.assertIn("MISMATCH", message)
+
+    def test_a_matching_contact_is_accepted(self):
+        outreach = outreach_row(**{"Company ID": "C044", "Company Name": "Pezesha"})
+        contacts = {"P001": {
+            "Contact ID": "P001", "Company ID": "C044",
+            "Company Name": "Pezesha", "Email": "hello@pezesha.com",
+        }}
+        route, target = resolve_route(outreach, contacts)
+        self.assertEqual(route, SendRoute.EMAIL)
+        self.assertEqual(target, "hello@pezesha.com")
+
+    def test_a_mismatched_row_is_excluded_from_export(self):
+        """The guard must actually stop it reaching data/to_send.txt."""
+        outreach = [outreach_row(**{"Company ID": "C048", "Company Name": "Glovo"})]
+        contacts = [{"Contact ID": "P001", "Company ID": "C044",
+                     "Company Name": "Pezesha", "Email": "hello@pezesha.com"}]
+        by_email, by_portal = build_export(outreach, contacts, {})
+        self.assertEqual(by_email, [])
