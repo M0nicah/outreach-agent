@@ -192,34 +192,103 @@ def cmd_fix_urls(config: Config, args) -> int:
 # Ready-made searches for the kinds of organisation worth approaching.
 # Used by `discover --preset`.
 SEARCH_PRESETS = {
+    # --- Technology companies -------------------------------------------
     "data": [
-        "data analytics companies Nairobi Kenya",
+        "data analytics consultancy Nairobi",
         "business intelligence company Kenya",
-        "data science company Nairobi",
+        "data engineering company Nairobi",
     ],
     "software": [
         "software development company Nairobi Kenya",
-        "software engineering firm Kenya careers",
+        "custom software company Kenya enterprise",
         "web application development company Nairobi",
     ],
     "startups": [
-        "Kenyan tech startups Nairobi hiring",
         "Nairobi startup engineering team careers",
-        "fintech startup Kenya careers",
+        "Kenyan startup hiring software engineers",
+        "Y Combinator startup Kenya Nairobi",
     ],
+    "fintech": [
+        "fintech company Nairobi Kenya",
+        "payments company Kenya technology",
+        "digital lending company Kenya",
+    ],
+
+    # --- Development sector ---------------------------------------------
     "ngo": [
-        "NGO Kenya data analysis monitoring evaluation jobs",
-        "international NGO Nairobi data team",
-        "humanitarian organisation Kenya data science",
+        "NGO Nairobi monitoring and evaluation data",
+        "international NGO Kenya data analyst",
+        "humanitarian organisation Kenya data team",
+    ],
+    "international": [
+        "UN agency Kenya Nairobi data",
+        "World Bank Kenya office",
+        "international organisation Nairobi data systems",
     ],
     "research": [
         "research institute Kenya data science",
-        "Kenya research organisation internship students",
+        "policy research organisation Nairobi",
+        "think tank Kenya data analysis",
     ],
+    "mande": [
+        "monitoring and evaluation consultancy Nairobi",
+        "survey data collection company Kenya",
+        "impact evaluation firm Kenya",
+    ],
+
+    # --- Public sector ---------------------------------------------------
+    "government": [
+        "Kenya government agency ICT department",
+        "county government Kenya data systems",
+        "Kenya state corporation technology department",
+    ],
+
+    # --- Established employers -------------------------------------------
+    "banking": [
+        "bank Kenya technology department careers",
+        "insurance company Kenya data analytics",
+        "SACCO management software Kenya",
+    ],
+    "telecom": [
+        "telecommunications company Kenya careers",
+        "internet service provider Kenya technology",
+    ],
+    "consulting": [
+        "technology consulting firm Nairobi",
+        "management consultancy Kenya data analytics",
+    ],
+
+    # --- Sector technology -----------------------------------------------
     "health": [
         "health technology company Kenya",
         "digital health company Nairobi",
+        "health data company Kenya",
     ],
+    "education": [
+        "edtech company Kenya Nairobi",
+        "education data company Kenya",
+    ],
+    "agritech": [
+        "agritech company Kenya data",
+        "agricultural technology company Nairobi",
+    ],
+    "logistics": [
+        "logistics technology company Nairobi",
+        "supply chain software Kenya",
+    ],
+    "energy": [
+        "renewable energy company Kenya data",
+        "solar company Kenya technology",
+    ],
+}
+
+# Presets grouped for the help text, so it is obvious what is on offer.
+PRESET_GROUPS = {
+    "Technology": ["data", "software", "startups", "fintech"],
+    "Development sector": ["ngo", "international", "research", "mande"],
+    "Public sector": ["government"],
+    "Established employers": ["banking", "telecom", "consulting"],
+    "Sector technology": ["health", "education", "agritech", "logistics", "energy"],
 }
 
 
@@ -241,7 +310,12 @@ def cmd_discover(config: Config, args) -> int:
     from app.excel import read_settings
 
     # Work out what to search for.
-    if args.preset:
+    if getattr(args, "all", False):
+        queries = [q for name in SEARCH_PRESETS for q in SEARCH_PRESETS[name]]
+        print(f"\n  Running every preset: {len(queries)} searches. This will be slow,")
+        print("  and free search engines may rate-limit part way through.")
+        print("  Whatever succeeds is kept in the staging file.\n")
+    elif args.preset:
         queries = SEARCH_PRESETS.get(args.preset)
         if not queries:
             logger.error(
@@ -252,12 +326,17 @@ def cmd_discover(config: Config, args) -> int:
     elif args.query:
         queries = [" ".join(args.query)]
     else:
-        logger.error(
-            "Give a search, or a preset.\n"
-            "    python main.py discover \"data analytics companies Nairobi\"\n"
-            "    python main.py discover --preset startups\n"
-            "  Presets: %s", ", ".join(sorted(SEARCH_PRESETS)),
-        )
+        print("\n  Give a search, or choose a preset:\n")
+        print('      python main.py discover "monitoring and evaluation consultancy Nairobi"')
+        print("      python main.py discover --preset ngo\n")
+        for group, names in PRESET_GROUPS.items():
+            print(f"    {group}")
+            for name in names:
+                first = SEARCH_PRESETS[name][0]
+                print(f'      --preset {name:<14} e.g. "{first}"')
+            print()
+        print("    Or --all to run every preset in turn "
+              "(slow; may hit rate limits).\n")
         return 1
 
     try:
@@ -333,16 +412,47 @@ def cmd_discover(config: Config, args) -> int:
         return 0
 
     # 4. Write a CSV for you to review before importing.
+    #
+    # APPEND rather than overwrite. Running discover twice in a row used
+    # to destroy the first run's results, which is a nasty surprise when
+    # you are searching several categories before importing any of them.
     import csv
 
     output = Path(args.output) if args.output else config.excel_path.parent / "discovered.csv"
+
+    HEADERS = ["Company Name", "Website", "Country", "Region", "Industry", "Source"]
+
+    # Read what is already staged, so we neither lose it nor duplicate it.
+    staged: list[dict] = []
+    staged_domains: set[str] = set()
+    if output.exists() and not args.replace:
+        try:
+            with output.open(newline="", encoding="utf-8-sig") as handle:
+                for row in csv.DictReader(handle):
+                    staged.append(row)
+                    site = str(row.get("Website", "")).strip()
+                    if site:
+                        from urllib.parse import urlparse
+
+                        host = urlparse(site).netloc.lower().removeprefix("www.")
+                        if host:
+                            staged_domains.add(host)
+        except (OSError, csv.Error) as exc:
+            logger.warning("Could not read existing %s (%s) -- starting fresh.",
+                           output.name, exc)
+
+    fresh = [c for c in reachable if c.domain not in staged_domains]
+    skipped_staged = len(reachable) - len(fresh)
+    if skipped_staged:
+        print(f"\n  {skipped_staged} already waiting in {output.name} -- not added twice.")
+
     try:
         with output.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(
-                ["Company Name", "Website", "Country", "Region", "Industry", "Source"]
-            )
-            for candidate in reachable:
+            writer.writerow(HEADERS)
+            for row in staged:
+                writer.writerow([row.get(h, "") for h in HEADERS])
+            for candidate in fresh:
                 writer.writerow([
                     candidate.name, candidate.url, args.country, args.region,
                     getattr(candidate, "sector", ""), f"Search: {candidate.query}",
@@ -351,10 +461,16 @@ def cmd_discover(config: Config, args) -> int:
         logger.error("Could not write %s: %s", output, exc)
         return 1
 
-    print(f"\n  Wrote {len(reachable)} organisation(s) to {output}")
-    print("\n  READ IT FIRST, delete any you do not want, then:")
-    print(f"      python main.py import-companies {output}")
-    print("      python main.py qualify\n")
+    total_staged = len(staged) + len(fresh)
+    if fresh:
+        print(f"\n  Added {len(fresh)} new organisation(s) to {output.name}.")
+    print(f"  {total_staged} organisation(s) now waiting to be imported.")
+    print("\n  Search more categories if you like -- results accumulate in that file.")
+    print("  When you are ready:")
+    print("      1. Open it and delete any you do not want")
+    print(f"      2. python main.py import-companies {output}")
+    print("      3. python main.py qualify\n")
+    print("  Importing clears the file, so nothing is offered twice.\n")
     return 0
 
 
@@ -433,9 +549,26 @@ def cmd_import_companies(config: Config, args) -> int:
         path = PROJECT_ROOT / path
 
     if not path.exists():
+        # The commonest cause is not a mistake at all: the file was
+        # cleared because it was already imported. Say so, rather than
+        # implying the user got the format wrong.
+        archive = path.parent / "discovered-imported.csv"
+        if path.name == "discovered.csv" and archive.exists():
+            print(f"\n  {path.name} is empty -- you have already imported it.")
+            print(f"  Its contents were archived to {archive.name}.\n")
+            print("  Nothing to do here. Your next step is probably:")
+            print("      python main.py qualify        (research the new companies)")
+            print("\n  To find more companies first:")
+            print('      python main.py discover "your search here"\n')
+            return 0
+
         logger.error(
             "CSV not found: %s\n"
-            "         It needs a header row with at least a 'Company Name' column.",
+            "         If you meant to find new companies first, run:\n"
+            '             python main.py discover "your search here"\n'
+            "         Or point this at your own CSV file, which needs a header "
+            "row with\n"
+            "         at least a 'Company Name' column.",
             path,
         )
         return 1
@@ -519,7 +652,65 @@ def cmd_import_companies(config: Config, args) -> int:
 
     print(f"\n  Imported {len(new_rows)} company/companies, all PENDING.")
     print(f"  Total in workbook: {len(existing) + len(new_rows)}")
+
+    # Clear the discovery staging file once its contents are safely in the
+    # workbook. Without this you would have to remember to empty it by
+    # hand, and a stale file makes it unclear what is still waiting.
+    # The file is moved rather than deleted, so a mistaken import is
+    # recoverable.
+    default_staging = config.excel_path.parent / "discovered.csv"
+    if path.resolve() == default_staging.resolve() and not args.keep:
+        archive = path.parent / "discovered-imported.csv"
+        try:
+            path.replace(archive)
+            print(f"\n  Cleared {path.name} (previous contents kept at {archive.name}).")
+        except OSError as exc:
+            logger.warning("Could not clear %s: %s", path.name, exc)
+
     print("\n  Next: python main.py qualify\n")
+    return 0
+
+
+def cmd_export_csv(config: Config, args) -> int:
+    """Write each sheet out as a plain CSV file.
+
+    Useful when Excel is being awkward, or when you just want to open the
+    data in something simpler. CSVs open in Excel, Numbers, Google Sheets
+    or a text editor, and they cannot show you a stale cached copy.
+    """
+    import csv
+
+    from app.excel import read_sheet
+
+    out_dir = Path(args.output) if args.output else config.excel_path.parent / "csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written = []
+    for sheet_name in schema.SHEET_NAMES:
+        try:
+            rows = read_sheet(config.excel_path, sheet_name)
+        except ExcelError as exc:
+            logger.error("%s", exc)
+            return 1
+
+        columns = schema.SHEET_COLUMNS[sheet_name]
+        path = out_dir / f"{sheet_name.lower()}.csv"
+        try:
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(columns)
+                for row in rows:
+                    writer.writerow([row.get(c, "") for c in columns])
+        except OSError as exc:
+            logger.error("Could not write %s: %s", path, exc)
+            return 1
+
+        written.append((path, len(rows)))
+
+    print()
+    for path, count in written:
+        print(f"  {count:>4} rows -> {path}")
+    print(f"\n  Open any of these in Excel, Numbers or a text editor.\n")
     return 0
 
 
@@ -871,6 +1062,7 @@ def cmd_draft(config: Config, args) -> int:
     """
     from app.email_drafts import (
         DraftError,
+        already_contacted_companies,
         build_signature,
         existing_outreach_keys,
         generate_draft,
@@ -913,6 +1105,10 @@ def cmd_draft(config: Config, args) -> int:
         )
 
     seen = existing_outreach_keys(outreach)
+    # Companies already written to, whatever the campaign label. This
+    # catches applications logged with `log-application`, which carry a
+    # different campaign and used to slip past the campaign-level check.
+    contacted = already_contacted_companies(outreach)
     next_number = int(next_id(outreach, "Outreach ID", "O")[1:])
     signature = build_signature(settings)
 
@@ -925,6 +1121,7 @@ def cmd_draft(config: Config, args) -> int:
             best_contact[company_id] = contact
 
     queue = []
+    skipped_contacted: list[tuple[str, str]] = []
     for company_id, contact in best_contact.items():
         company = companies.get(company_id)
         if not company:
@@ -934,7 +1131,25 @@ def cmd_draft(config: Config, args) -> int:
         status = str(company.get("Research Status", "")).strip().upper()
         if status != schema.RESEARCH_QUALIFY and not args.include_review:
             continue
+
+        # Do not write to a company you have already contacted, however
+        # that contact was made.
+        if company_id in contacted and not args.again:
+            skipped_contacted.append(
+                (str(company.get("Company Name", "?")), contacted[company_id])
+            )
+            continue
+
         queue.append((company, contact))
+
+    if skipped_contacted:
+        print(f"\n  Skipping {len(skipped_contacted)} company/companies you have "
+              "already contacted:")
+        for name, why in skipped_contacted[:12]:
+            print(f"    {name[:34]:<36} {why}")
+        if len(skipped_contacted) > 12:
+            print(f"    ... and {len(skipped_contacted) - 12} more")
+        print("  Use --again to draft for them anyway.")
 
     if args.limit:
         queue = queue[: args.limit]
@@ -1250,9 +1465,12 @@ def _warn_if_open_in_excel(config: Config) -> None:
     lock = config.excel_path.parent / f"~${config.excel_path.name}"
     if lock.exists():
         logger.warning(
-            "The workbook appears to be OPEN in Excel. Any edits you have not "
-            "saved will not be visible here. Press Cmd+S and close it, then "
-            "run this again."
+            "The workbook is OPEN in Excel right now. This causes two problems:\n"
+            "           1. Edits you have not saved are invisible to this command.\n"
+            "           2. Rows this command adds will NOT appear in Excel until\n"
+            "              you close the workbook and reopen it.\n"
+            "         Close Excel (saying No to 'Save changes?' if the file has\n"
+            "         been updated underneath you), then reopen it to see changes."
         )
 
 
@@ -2165,6 +2383,7 @@ COMMANDS = {
     "init-excel": cmd_init_excel,
     "load-samples": cmd_load_samples,
     "show-companies": cmd_show_companies,
+    "export-csv": cmd_export_csv,
     "check-excel": cmd_check_excel,
     "discover": cmd_discover,
     "import-companies": cmd_import_companies,
@@ -2222,7 +2441,11 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("query", nargs="*", help="What to search for.")
     discover_parser.add_argument(
         "--preset", default=None,
-        help="A ready-made search: data, software, startups, ngo, research, health.",
+        help="A ready-made search. Run `discover` with no arguments to see them all.",
+    )
+    discover_parser.add_argument(
+        "--all", action="store_true",
+        help="Run every preset in turn. Slow, and may hit rate limits.",
     )
     discover_parser.add_argument(
         "--engine", choices=["duckduckgo", "brave"], default="duckduckgo",
@@ -2235,6 +2458,10 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--region", default="Nairobi", help="Region column value.")
     discover_parser.add_argument("--output", default=None, help="Where to write the CSV.")
     discover_parser.add_argument(
+        "--replace", action="store_true",
+        help="Overwrite the staging file instead of adding to it.",
+    )
+    discover_parser.add_argument(
         "--no-screen", action="store_true", help="Skip AI screening of results."
     )
 
@@ -2245,7 +2472,18 @@ def build_parser() -> argparse.ArgumentParser:
         "csv_path", nargs="?", default="data/companies_to_add.csv",
         help="Path to the CSV (default: data/companies_to_add.csv).",
     )
-    subparsers.add_parser("show-companies", help="List companies in the workbook.")
+    import_parser.add_argument(
+        "--keep", action="store_true",
+        help="Do not clear data/discovered.csv after importing it.",
+    )
+    companies_parser = subparsers.add_parser(
+        "show-companies", help="List companies in the workbook."
+    )
+
+    csv_parser = subparsers.add_parser(
+        "export-csv", help="Write every sheet out as a plain CSV file."
+    )
+    csv_parser.add_argument("--output", default=None, help="Folder to write into.")
     subparsers.add_parser("check-excel", help="Validate the workbook structure.")
 
     qualify_parser = subparsers.add_parser(
@@ -2295,6 +2533,10 @@ def build_parser() -> argparse.ArgumentParser:
     draft_parser.add_argument(
         "--include-review", action="store_true",
         help="Also draft for NEEDS_REVIEW companies.",
+    )
+    draft_parser.add_argument(
+        "--again", action="store_true",
+        help="Draft even for companies you have already contacted.",
     )
 
     subparsers.add_parser(
@@ -2422,6 +2664,14 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         logger.error("Unknown command: %s", command)
         return 1
+
+    # Excel keeps the workbook in memory while it is open. That causes two
+    # problems people hit constantly:
+    #   - edits you have not saved are invisible to these commands
+    #   - rows these commands ADD are invisible in Excel until you reopen
+    # So warn once, for every command that touches the workbook.
+    if command not in {"status", "init-excel", "gmail-auth"}:
+        _warn_if_open_in_excel(config)
 
     return handler(config, args)
 

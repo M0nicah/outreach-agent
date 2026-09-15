@@ -131,8 +131,8 @@ def search_duckduckgo(query: str, count: int = 20) -> list[dict[str, Any]]:
 
     if response.status_code == 429:
         raise DiscoverError(
-            "DuckDuckGo is rate limiting us. Wait a few minutes and try again, "
-            "or run one query at a time instead of a preset."
+            "DuckDuckGo is rate-limiting us (HTTP 429). Wait 5-15 minutes, then "
+            "run ONE search rather than a --preset. Nothing was lost."
         )
     if response.status_code >= 400:
         raise DiscoverError(f"DuckDuckGo returned HTTP {response.status_code}.")
@@ -146,9 +146,17 @@ def search_duckduckgo(query: str, count: int = 20) -> list[dict[str, Any]]:
         # Two causes, and they need different responses, so say both.
         if "anomaly" in html.lower() or "unusual traffic" in html.lower():
             raise DiscoverError(
-                "DuckDuckGo is temporarily blocking us for making too many "
-                "queries. Wait a few minutes, then run a single search rather "
-                "than a preset."
+                "DuckDuckGo is temporarily rate-limiting us.\n"
+                "         This is not an error in your setup and nothing was "
+                "lost -- anything\n"
+                "         already in data/discovered.csv is still there.\n\n"
+                "         What to do:\n"
+                "           - Wait 5-15 minutes. It clears on its own.\n"
+                "           - Then run ONE search rather than a --preset "
+                "(a preset fires\n"
+                "             three searches at once, which is what triggers "
+                "this).\n"
+                "           - Or use --engine brave if you have SEARCH_API_KEY set."
             )
         logger.warning(
             "DuckDuckGo returned no results for this query. Either nothing "
@@ -179,11 +187,106 @@ def search_duckduckgo(query: str, count: int = 20) -> list[dict[str, Any]]:
     return results
 
 
-def search(config: Config, query: str, count: int = 20, engine: str = "duckduckgo"):
-    """Run a search on the chosen engine."""
-    if engine == "brave":
-        return search_brave(config, query, count)
-    return search_duckduckgo(query, count)
+def search_serper(config: Config, query: str, count: int = 20) -> list[dict[str, Any]]:
+    """Search via Serper.dev (a Google results API).
+
+    Needs SERPER_API_KEY in .env. Included because it is a common free
+    tier; verify the current allowance at serper.dev before relying on it.
+    """
+    api_key = config.serper_api_key
+    if not api_key:
+        raise DiscoverError(
+            "SERPER_API_KEY is not set, which the serper engine needs.\n"
+            "Get a key at https://serper.dev, then add it to .env."
+        )
+
+    try:
+        response = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            json={"q": query, "num": min(count, 20), "gl": "ke"},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise DiscoverError(f"Serper request failed: {exc}") from exc
+
+    if response.status_code in (401, 403):
+        raise DiscoverError("Serper rejected the API key. Check SERPER_API_KEY in .env.")
+    if response.status_code == 429:
+        raise DiscoverError("Serper quota reached. Check your allowance at serper.dev.")
+    if response.status_code >= 400:
+        raise DiscoverError(f"Serper returned HTTP {response.status_code}.")
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise DiscoverError(f"Serper returned invalid JSON: {exc}") from exc
+
+    return [
+        {"url": r.get("link", ""), "title": r.get("title", ""),
+         "description": r.get("snippet", "")}
+        for r in payload.get("organic", [])
+    ]
+
+
+# Engines in preference order when falling back. DuckDuckGo first because
+# it needs no key; the others are only reachable if you have configured
+# their keys.
+ENGINES = {
+    "duckduckgo": lambda config, q, n: search_duckduckgo(q, n),
+    "brave": lambda config, q, n: search_brave(config, q, n),
+    "serper": lambda config, q, n: search_serper(config, q, n),
+}
+
+FALLBACK_ORDER = ["duckduckgo", "brave", "serper"]
+
+
+def available_engines(config: Config) -> list[str]:
+    """Engines we could actually use, given the keys configured."""
+    usable = ["duckduckgo"]  # never needs a key
+    if config.search_api_key:
+        usable.append("brave")
+    if getattr(config, "serper_api_key", None):
+        usable.append("serper")
+    return usable
+
+
+def search(
+    config: Config, query: str, count: int = 20, engine: str = "duckduckgo",
+    fallback: bool = True,
+) -> list[dict[str, Any]]:
+    """Run a search, optionally falling back to another engine.
+
+    A rate limit on one free engine should not end the run if another is
+    configured. We try the chosen engine first, then any others that have
+    keys, and only give up when all of them refuse.
+    """
+    caller = ENGINES.get(engine)
+    if caller is None:
+        raise DiscoverError(
+            f"Unknown engine {engine!r}. Available: {', '.join(sorted(ENGINES))}."
+        )
+
+    order = [engine]
+    if fallback:
+        order += [e for e in FALLBACK_ORDER
+                  if e != engine and e in available_engines(config)]
+
+    errors: list[str] = []
+    for name in order:
+        try:
+            results = ENGINES[name](config, query, count)
+            if name != engine:
+                logger.info("Fell back to the %s engine for this query.", name)
+            return results
+        except DiscoverError as exc:
+            errors.append(f"{name}: {exc}")
+            continue
+
+    raise DiscoverError(
+        "Every available search engine refused this query.\n         "
+        + "\n         ".join(errors)
+    )
 
 
 

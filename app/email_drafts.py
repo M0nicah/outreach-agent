@@ -293,7 +293,7 @@ def to_outreach_row(
 def existing_outreach_keys(outreach: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
     """(company, contact, campaign) triples already drafted.
 
-    Duplicate prevention, per your specification: the same contact must
+    Duplicate prevention, per the specification: the same contact must
     not receive two initial emails for the same campaign.
     """
     return {
@@ -304,3 +304,44 @@ def existing_outreach_keys(outreach: list[dict[str, Any]]) -> set[tuple[str, str
         )
         for row in outreach
     }
+
+
+def already_contacted_companies(outreach: list[dict[str, Any]]) -> dict[str, str]:
+    """Companies that have already been written to, whatever the campaign.
+
+    The campaign-level check above is not enough on its own. If you apply
+    to a company yourself and log it with `log-application`, that row
+    carries a different campaign label -- so a later `draft` run saw it as
+    new work and wrote a second email to a company you had already
+    contacted.
+
+    This keys on the company alone, which is what actually matters: you
+    do not want to email an organisation twice about the same thing.
+
+    Returns company ID -> a short explanation, so the caller can say WHY
+    it skipped rather than silently dropping it.
+    """
+    contacted: dict[str, str] = {}
+    for row in outreach:
+        company_id = str(row.get("Company ID", "")).strip()
+        if not company_id:
+            continue
+
+        status = str(row.get("Email Status", "")).strip().upper()
+        reply = str(row.get("Reply Status", "")).strip().upper()
+        outreach_id = str(row.get("Outreach ID", "")).strip()
+
+        # A reply is checked first: it is the most useful thing to tell
+        # you, and it outranks "we sent something" as a reason to stop.
+        if reply and reply != schema.REPLY_NONE:
+            contacted[company_id] = f"they already replied: {reply} ({outreach_id})"
+        elif status == schema.EMAIL_SENT:
+            when = str(row.get("Date Sent", "")).strip()[:10]
+            when_text = f" on {when}" if when else ""
+            contacted[company_id] = f"already contacted{when_text} ({outreach_id})"
+        elif company_id not in contacted:
+            # A draft exists but has not gone out. Not a hard block, but
+            # worth flagging so you do not accumulate two drafts.
+            contacted[company_id] = f"a draft already exists ({outreach_id})"
+
+    return contacted

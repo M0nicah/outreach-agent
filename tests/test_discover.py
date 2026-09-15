@@ -142,3 +142,24 @@ class TestJobAdvertFiltering(unittest.TestCase):
 class TestHtmlEntities(unittest.TestCase):
     def test_entities_are_decoded_in_names(self):
         self.assertEqual(clean_name("Data &amp; Analytics Ltd | Home"), "Data & Analytics Ltd")
+
+
+class TestStagingFileBehaviour(unittest.TestCase):
+    """Searching twice must not destroy the first search's results.
+
+    The original version overwrote data/discovered.csv on every run, so
+    searching three categories before importing any of them silently lost
+    the first two. Results now accumulate, and importing clears the file.
+    """
+
+    def test_existing_domains_prevent_restaging(self):
+        """A company already in the workbook is never offered again."""
+        companies = [{"Website": "https://leta.ai"}]
+        known = existing_domains(companies)
+        candidate = Candidate(name="Leta", url="https://leta.ai")
+        self.assertIn(candidate.domain, known)
+
+    def test_domains_compare_without_www(self):
+        companies = [{"Website": "https://www.betaagritech.com"}]
+        candidate = Candidate(name="BETA", url="https://betaagritech.com")
+        self.assertIn(candidate.domain, existing_domains(companies))

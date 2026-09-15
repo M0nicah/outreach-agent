@@ -146,6 +146,35 @@ def _open(path: Path) -> Workbook:
         raise ExcelError(f"Could not read {path}: {exc}") from exc
 
 
+def _prepare_for_viewing(workbook: Workbook) -> None:
+    """Make the workbook open somewhere sensible in Excel.
+
+    Two small things that cause real confusion otherwise:
+
+    1. Excel reopens on whichever sheet was last active. After a run that
+       touched Outreach, the workbook would open on Outreach and new
+       Companies rows looked "missing". We always open on Companies.
+    2. The autofilter must cover the whole data range. Left on the header
+       row alone, Excel's filter dropdowns can behave as though the data
+       below is not part of the table.
+    """
+    from openpyxl.utils import get_column_letter
+
+    try:
+        if schema.COMPANIES in workbook.sheetnames:
+            workbook.active = workbook.sheetnames.index(schema.COMPANIES)
+
+        for name in workbook.sheetnames:
+            sheet = workbook[name]
+            columns = schema.SHEET_COLUMNS.get(name)
+            if columns and sheet.max_row >= 1:
+                last = get_column_letter(len(columns))
+                sheet.auto_filter.ref = f"A1:{last}{sheet.max_row}"
+    except Exception as exc:
+        # Cosmetic only -- never let this stop a save.
+        logger.debug("Could not set view preferences: %s", exc)
+
+
 def _save(workbook: Workbook, path: Path) -> None:
     """Save the workbook, with a clear error if the file is locked.
 
@@ -153,6 +182,7 @@ def _save(workbook: Workbook, path: Path) -> None:
     workbook open in Excel and Python cannot write to it. A plain traceback
     is confusing, so we say exactly what to do.
     """
+    _prepare_for_viewing(workbook)
     try:
         workbook.save(path)
     except PermissionError as exc:

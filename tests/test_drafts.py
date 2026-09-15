@@ -264,3 +264,68 @@ class TestGeneration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAlreadyContactedCompanies(unittest.TestCase):
+    """A company you have already written to must not be drafted again.
+
+    The campaign-level check was not enough. Applying to a company
+    yourself and logging it with `log-application` creates a row with the
+    campaign "Applied outside the system", so a later draft run saw a
+    different campaign and wrote a second email. That happened to Rudder
+    Research, which had already received an application.
+    """
+
+    def test_a_sent_company_is_blocked(self):
+        from app.email_drafts import already_contacted_companies
+
+        outreach = [{
+            "Outreach ID": "O029", "Company ID": "C043",
+            "Email Status": schema.EMAIL_SENT, "Date Sent": "2026-09-14",
+            "Reply Status": schema.REPLY_NONE,
+        }]
+        contacted = already_contacted_companies(outreach)
+        self.assertIn("C043", contacted)
+        self.assertIn("already contacted", contacted["C043"])
+
+    def test_a_manual_application_blocks_a_later_draft(self):
+        """The exact bug: a different campaign label must not slip past."""
+        from app.email_drafts import already_contacted_companies
+
+        outreach = [{
+            "Outreach ID": "O029", "Company ID": "C043",
+            "Campaign": "Applied outside the system",
+            "Email Status": schema.EMAIL_SENT, "Date Sent": "2026-09-14",
+            "Reply Status": schema.REPLY_NONE,
+        }]
+        self.assertIn("C043", already_contacted_companies(outreach))
+
+    def test_a_company_with_a_reply_is_blocked(self):
+        from app.email_drafts import already_contacted_companies
+
+        outreach = [{
+            "Outreach ID": "O003", "Company ID": "C006",
+            "Email Status": schema.EMAIL_SENT, "Reply Status": "POSITIVE",
+        }]
+        self.assertIn("replied", already_contacted_companies(outreach)["C006"])
+
+    def test_an_existing_draft_is_flagged(self):
+        from app.email_drafts import already_contacted_companies
+
+        outreach = [{
+            "Outreach ID": "O005", "Company ID": "C010",
+            "Email Status": schema.EMAIL_DRAFTED, "Reply Status": schema.REPLY_NONE,
+        }]
+        self.assertIn("draft already exists", already_contacted_companies(outreach)["C010"])
+
+    def test_an_untouched_company_is_not_blocked(self):
+        from app.email_drafts import already_contacted_companies
+
+        self.assertEqual(already_contacted_companies([]), {})
+
+    def test_rows_without_a_company_id_are_ignored(self):
+        from app.email_drafts import already_contacted_companies
+
+        outreach = [{"Outreach ID": "O099", "Company ID": "",
+                     "Email Status": schema.EMAIL_SENT}]
+        self.assertEqual(already_contacted_companies(outreach), {})

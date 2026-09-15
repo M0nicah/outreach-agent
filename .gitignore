@@ -31,3 +31,10 @@ COMMANDS.md
 
 # Application documents (contain personal contact details)
 applications/
+
+# Discovery staging files
+data/discovered.csv
+data/discovered-imported.csv
+
+# Plain-CSV exports of the workbook
+data/csv/

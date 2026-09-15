@@ -80,6 +80,7 @@ class Config:
 
     # Follow-up schedule: days after the initial send.
     search_api_key: str | None
+    serper_api_key: str | None
 
     followup_1_days: int
     followup_2_days: int
@@ -173,6 +174,7 @@ def load_config() -> Config:
         ai_model=model,
         seconds_between_ai_calls=_get_int("SECONDS_BETWEEN_AI_CALLS", 4),
         search_api_key=os.getenv("SEARCH_API_KEY") or None,
+        serper_api_key=os.getenv("SERPER_API_KEY") or None,
         followup_1_days=_get_int("FOLLOWUP_1_DAYS", 5),
         followup_2_days=_get_int("FOLLOWUP_2_DAYS", 12),
         followup_3_days=_get_int("FOLLOWUP_3_DAYS", 22),
