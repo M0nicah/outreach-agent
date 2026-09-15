@@ -1551,6 +1551,7 @@ def cmd_export(config: Config, args) -> int:
         logger.error("%s", exc)
         return 1
 
+    outreach = _filter_rows(outreach, args)
     by_email, by_portal = build_export(outreach, contacts, settings)
 
     if not by_email and not by_portal:
@@ -1958,6 +1959,30 @@ def cmd_gmail_test(config: Config, args) -> int:
     return 0
 
 
+def _filter_rows(rows: list[dict], args) -> list[dict]:
+    """Narrow a set of outreach rows by the --only / --since flags.
+
+    Exists so you can send a specific batch instead of everything that is
+    approved -- for example just today's drafts, or three named IDs.
+    """
+    only = getattr(args, "only", None)
+    if only:
+        wanted = {i.strip().upper() for i in only}
+        rows = [r for r in rows
+                if str(r.get("Outreach ID", "")).strip().upper() in wanted]
+
+    since = getattr(args, "since", None)
+    if since:
+        if since.lower() == "today":
+            from datetime import date
+
+            since = date.today().isoformat()
+        rows = [r for r in rows
+                if str(r.get("Date Drafted", "")).strip()[:10] >= since]
+
+    return rows
+
+
 def cmd_send(config: Config, args) -> int:
     """Send approved emails through Gmail.
 
@@ -2000,12 +2025,19 @@ def cmd_send(config: Config, args) -> int:
         if allowed:
             approved.append(row)
 
+    # 2. Optional narrowing, so you can send a specific batch rather than
+    #    everything that happens to be approved.
+    approved = _filter_rows(approved, args)
+    if not approved:
+        print("\n  Nothing matches that filter.\n")
+        return 0
+
     if not approved:
         print("\n  Nothing is approved and unsent.")
         print("  Run `python main.py check-approvals` to see why.\n")
         return 0
 
-    # 2. Split by route. Portal applications cannot be emailed.
+    # 3. Split by route. Portal applications cannot be emailed.
     sendable = []
     portal_only = []
     for row in approved:
@@ -2015,7 +2047,7 @@ def cmd_send(config: Config, args) -> int:
         else:
             portal_only.append((row, target))
 
-    # 3. Daily limit and batch size.
+    # 4. Daily limit and batch size.
     already = sent_today(outreach)
     remaining = remaining_today(config, outreach)
     batch = min(config.batch_size, remaining, len(sendable))
@@ -2054,7 +2086,7 @@ def cmd_send(config: Config, args) -> int:
         print("\n  Set DRY_RUN=false in .env to send for real.\n")
         return 0
 
-    # 4. Confirm before sending to real people.
+    # 5. Confirm before sending to real people.
     if not args.yes:
         print("  These emails will be sent to real people:\n")
         for row, target in sendable[:batch]:
@@ -2576,6 +2608,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, help="Send at most N this run."
     )
     send_parser.add_argument(
+        "--only", nargs="+", default=None, metavar="ID",
+        help="Send only these Outreach IDs, e.g. --only O016 O023.",
+    )
+    send_parser.add_argument(
+        "--since", default=None, metavar="DATE",
+        help="Only rows drafted on or after this date (YYYY-MM-DD, or 'today').",
+    )
+    send_parser.add_argument(
         "--yes", action="store_true", help="Skip the confirmation prompt."
     )
 
@@ -2618,6 +2658,14 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         "--output", default=None,
         help="Where to write the file (default: data/to_send.txt).",
+    )
+    export_parser.add_argument(
+        "--only", nargs="+", default=None, metavar="ID",
+        help="Export only these Outreach IDs.",
+    )
+    export_parser.add_argument(
+        "--since", default=None, metavar="DATE",
+        help="Only rows drafted on or after this date (YYYY-MM-DD, or 'today').",
     )
 
     sent_parser = subparsers.add_parser(

@@ -136,3 +136,45 @@ class TestMarkSent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBatchFilters(unittest.TestCase):
+    """--only and --since let you send a specific batch, not everything."""
+
+    class Args:
+        only = None
+        since = None
+
+    ROWS = [
+        {"Outreach ID": "O001", "Date Drafted": "2026-09-14"},
+        {"Outreach ID": "O016", "Date Drafted": "2026-09-14"},
+        {"Outreach ID": "O040", "Date Drafted": "2026-09-15"},
+    ]
+
+    def _filter(self, **kwargs):
+        import main
+
+        args = self.Args()
+        for k, v in kwargs.items():
+            setattr(args, k, v)
+        return main._filter_rows(self.ROWS, args)
+
+    def test_no_filter_returns_everything(self):
+        self.assertEqual(len(self._filter()), 3)
+
+    def test_only_selects_named_ids(self):
+        result = self._filter(only=["O016", "O040"])
+        self.assertEqual([r["Outreach ID"] for r in result], ["O016", "O040"])
+
+    def test_only_is_case_insensitive(self):
+        self.assertEqual(len(self._filter(only=["o016"])), 1)
+
+    def test_since_keeps_that_date_and_later(self):
+        result = self._filter(since="2026-09-15")
+        self.assertEqual([r["Outreach ID"] for r in result], ["O040"])
+
+    def test_since_includes_the_boundary_date(self):
+        self.assertEqual(len(self._filter(since="2026-09-14")), 3)
+
+    def test_an_unmatched_filter_returns_nothing(self):
+        self.assertEqual(self._filter(only=["O999"]), [])
